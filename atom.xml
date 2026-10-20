@@ -5,14 +5,14 @@
   <link href="https://jaisong1n.com/" rel="alternate" type="text/html"/>
   <link href="https://jaisong1n.com/atom.xml" rel="self" type="application/atom+xml"/>
   <id>https://jaisong1n.com/</id>
-  <updated>2026-10-19T02:39:47.000Z</updated>
+  <updated>2026-10-20T00:04:54.000Z</updated>
   <language>zh_CN</language>
   <entry>
     <title>REA：当 Agent 开始理解没有源码的软件</title>
     <link href="https://jaisong1n.com/posts/rea-agent-understanding-software-without-source/" rel="alternate" type="text/html"/>
     <id>https://jaisong1n.com/posts/rea-agent-understanding-software-without-source/</id>
     <published>2026-10-19T02:35:09.000Z</published>
-    <updated>2026-10-19T02:39:47.000Z</updated>
+    <updated>2026-10-20T00:04:54.000Z</updated>
     <summary>REA 扩展了 Agent 分析没有源码的软件的能力。本文从本地数据库与云端信息的边界出发，区分理解程序、复现功能与重建系统，并讨论证据与验证的局限。</summary>
     <content type="html"><![CDATA[<p><em>本文基于 REA 官方项目文档与仓库源码撰写，属于技术观察。我尚未亲自使用 REA。文中的调查过程是说明方法的假设示例，不是实测记录。本文讨论的是查阅时的仓库内容；仓库主分支与已发布软件包可能存在能力差异。</em></p>
 <h2>从 REA 说起：为什么逆向工程项目会引起 Agent 开发者的关注？</h2>
