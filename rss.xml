@@ -1,4 +1,117 @@
-<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>JaisonG1n</title><description>Code, AI and Everything in Between</description><link>https://jaisong1n.com/</link><language>zh_CN</language><item><title>REA：当 Agent 开始理解没有源码的软件</title><link>https://jaisong1n.com/posts/rea-agent-understanding-software-without-source/</link><guid isPermaLink="true">https://jaisong1n.com/posts/rea-agent-understanding-software-without-source/</guid><description>REA 扩展了 Agent 分析没有源码的软件的能力。本文从本地数据库与云端信息的边界出发，区分理解程序、复现功能与重建系统，并讨论证据与验证的局限。</description><pubDate>Mon, 19 Oct 2026 02:35:09 GMT</pubDate><content:encoded>&lt;p&gt;&lt;em&gt;本文基于 REA 官方项目文档与仓库源码撰写，属于技术观察。我尚未亲自使用 REA。文中的调查过程是说明方法的假设示例，不是实测记录。本文讨论的是查阅时的仓库内容；仓库主分支与已发布软件包可能存在能力差异。&lt;/em&gt;&lt;/p&gt;
+<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>JaisonG1n</title><description>Code, AI and Everything in Between</description><link>https://jaisong1n.com/</link><language>zh_CN</language><item><title>深入理解 Agent Runtime：模型、执行环境、工具调用与沙盒安全</title><link>https://jaisong1n.com/posts/understanding-agent-runtime-tool-calling-sandbox/</link><guid isPermaLink="true">https://jaisong1n.com/posts/understanding-agent-runtime-tool-calling-sandbox/</guid><description>从模型推理服务到 Agent Runtime，拆解状态、工具分发、执行环境、调用时序与沙盒权限，说明模型输出怎样变成可控行动。</description><pubDate>Thu, 22 Oct 2026 11:18:15 GMT</pubDate><content:encoded>&lt;p&gt;同样接入 GPT，为什么一个应用只能回答问题，Codex 却能读取仓库、改文件和运行命令？差异不只在模型。模型生成内容或工具调用请求；把请求变成可执行、可限制、可追踪的行动，需要另一层软件。我把这层称为 &lt;strong&gt;Agent Runtime&lt;/strong&gt;，也可叫 Harness。&lt;/p&gt;
+&lt;p&gt;上一篇从操作系统角度说明“模型不是进程”。这次向上看一层：Runtime 如何连接推理服务、任务状态、工具与真实环境，以及为何安全策略必须落在可执行的软件边界上。下文的组件图是教学划分，不是任何厂商公开的完整生产部署图。&lt;/p&gt;
+&lt;h2&gt;01｜为什么强模型仍需要 Runtime&lt;/h2&gt;
+&lt;p&gt;让模型回答“如何运行测试”，它可以生成命令文本；让 Agent 真正运行测试，还要知道工作目录、可用工具、参数格式、文件权限、超时和失败后的处理方式。模型无法仅凭权重取得仓库访问权。OpenAI 的 &lt;a href=&quot;https://developers.openai.com/api/docs/guides/function-calling&quot;&gt;Function Calling 文档&lt;/a&gt;区分模型返回的调用请求和应用侧执行；&lt;a href=&quot;https://openai.com/index/unlocking-the-codex-harness/&quot;&gt;Codex Harness 文章&lt;/a&gt;公开描述了 Agent Loop、线程持久化、工具执行、认证与沙盒等软件职责。&lt;/p&gt;
+&lt;p&gt;这给我一个判断标准：研究 Agent 能力时，既要看模型能提出什么动作，也要看系统能否正确、可控地完成动作。&lt;/p&gt;
+&lt;h2&gt;02｜Model Runtime 与 Agent Runtime 是两层系统&lt;/h2&gt;
+&lt;p&gt;&lt;strong&gt;Model Inference Runtime&lt;/strong&gt;负责把模型权重加载到计算环境，处理 Token、推理计算、KV Cache 和批处理等。vLLM 的 &lt;a href=&quot;https://docs.vllm.ai/en/latest/design/paged_attention/&quot;&gt;Paged Attention 设计&lt;/a&gt;及 &lt;a href=&quot;https://docs.sglang.io/&quot;&gt;SGLang 文档&lt;/a&gt;展示了推理服务在吞吐、缓存与调度上的典型关注点。这里说的是这类公开框架的一般机制，不能反推 OpenAI 的未公开生产推理架构。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Agent Runtime&lt;/strong&gt;消费模型服务的输出，组织多轮交互、工具调用、状态、权限与恢复。OpenAI 公开提供不同集成层次：使用 &lt;a href=&quot;https://developers.openai.com/api/docs/guides/function-calling&quot;&gt;Responses API 的工具调用&lt;/a&gt;时，开发者可自行组织应用侧循环；&lt;a href=&quot;https://developers.openai.com/api/docs/guides/agents/running-agents&quot;&gt;Agents SDK&lt;/a&gt;提供运行 Agent 的框架；&lt;a href=&quot;https://developers.openai.com/api/docs/guides/agents-api/architecture&quot;&gt;Agents API 架构&lt;/a&gt;则公开托管 Agent 会话、环境和工具等概念。Codex 还有其公开介绍的 Harness 与 App Server。这些接口与产品并非同一个实现的不同名字。&lt;/p&gt;
+&lt;p&gt;GPT 模型可以被 ChatGPT、Codex 或开发者应用接入，但工具清单和运行机制由各应用提供。某个 GPT 能在 Codex 中执行终端工具，不意味着同一模型在所有应用里都天然拥有终端、浏览器或文件权限。&lt;/p&gt;
+&lt;h2&gt;03｜Runtime 的关键职责&lt;/h2&gt;
+&lt;p&gt;为了分析，我把常见职责拆成八组；实际系统可以合并、外包或省略某些模块。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Agent Loop / Runner&lt;/strong&gt;接收用户目标，发起模型请求，判断回复是最终答案还是工具调用；工具返回后决定继续、结束、超时或交还人工。它需要限制迭代次数与资源使用，否则一次失败可能变成无界重试。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Model Client / Adapter&lt;/strong&gt;把上下文、工具定义和参数 Schema 转成模型接口的请求，并把模型返回的文本、调用项、错误和调用标识转成 Runtime 可处理的对象。更换模型服务时，这层隔离接口差异；它并不负责实际运行 shell。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Context / State Manager&lt;/strong&gt;保存对话、已完成动作、工具反馈和当前目标。Context 是本轮送入模型的材料；Session 是一段可继续的交互生命周期；Memory 是跨轮或跨会话保存并按需检索的事实；Checkpoint 是为了中断后恢复而持久化的执行位置。四者可能重叠，却不能都叫“聊天记录”。Codex 公开文档中的 thread 是会话与事件历史，不是 OS Thread。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Tool Registry / Dispatcher&lt;/strong&gt;维护工具名、描述、参数 Schema 和处理器映射。收到模型的工具名后，它还要校验参数，定位执行器，记录调用标识。Schema 能约束输入形状，却不能替代业务校验与权限判断。不存在的工具或越界参数应返回可解释的错误。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Execution Environment&lt;/strong&gt;承接真正的动作：进程内函数、子进程、远程 API、MCP Server，或容器、虚拟机里的沙盒工具。它决定工作目录、文件挂载、网络与资源限制。Runtime 与执行环境可以在同一机器，也可以隔着网络。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Orchestrator / Scheduler&lt;/strong&gt;处理多步依赖、并发和子 Agent 分工。有些系统把它写在 Loop 中；另一些系统单独调度。可并行的只读步骤可以并发，依赖前一步结果的写入必须等待；“多个 Agent”也不自动等于多个 OS 线程。&lt;a href=&quot;https://developers.openai.com/api/docs/guides/agents/orchestration&quot;&gt;Agents SDK 编排文档&lt;/a&gt;提供了公开的 handoff 与编排例子。&lt;/p&gt;
+&lt;p&gt;Anthropic 在 &lt;a href=&quot;https://www.anthropic.com/research/building-effective-agents&quot;&gt;Building effective agents&lt;/a&gt; 中区分预定义代码路径的 workflow 与由模型动态决定工具使用的 agent。这种区分提醒我：调度器不必把每一步都交给模型；已确定的依赖关系交给代码，往往更容易检验。该文发表于 2024 年，其页面也提示部分工具生态描述已有变化，本文只借用这一结构性区分。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Security / Policy&lt;/strong&gt;根据身份、目标资源、工具风险和环境能力判断能否执行，必要时要求人工审批，并在执行环境施加隔离。&lt;strong&gt;Tracing / Recovery&lt;/strong&gt;记录调用、输入摘要、结果、耗时与错误，供排障、评测及中断恢复使用；恢复前必须判断操作是否已经产生副作用，不能机械重试。OpenAI 的 &lt;a href=&quot;https://developers.openai.com/api/docs/guides/agents-api/errors&quot;&gt;Agents API 错误与恢复文档&lt;/a&gt;特别要求先检查已完成动作。&lt;/p&gt;
+&lt;p&gt;这八组职责之间有一条容易忽略的依赖：可恢复性需要先有可辨认的执行记录。假如一次外部 API 写入在网络超时前已经成功，Runtime 仅凭“没收到响应”重放同一写入，可能造成重复副作用。调用标识、幂等键、状态回读和有界重试因此属于执行设计的一部分，而不是日志系统的装饰功能。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://cms.jaisong1n.com/wp-content/uploads/2026/10/figure-1.png&quot; alt=&quot;Agent Runtime 的逻辑组件与外部模型推理服务、工具服务及执行环境的关系图。&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;图 1：蓝色区域是本文的教学用 Runtime 职责划分；紫色服务和绿色执行环境在边界外。箭头只示意主要连接，组件可以在具体系统中合并。&lt;/p&gt;
+&lt;h2&gt;04｜GPT 的一次工具调用如何落地&lt;/h2&gt;
+&lt;p&gt;设用户要求“运行这个仓库的 &lt;code&gt;pytest&lt;/code&gt;，告诉我失败原因”。Runtime 先构造模型输入：用户目标、相关上下文以及它允许使用的终端工具定义。工具 Schema 说明名称、参数类型和必填字段，例如 &lt;code&gt;command&lt;/code&gt; 是字符串、&lt;code&gt;timeout&lt;/code&gt; 是受限整数。模型可能返回一个包含工具名、参数和调用标识的结构化请求。&lt;strong&gt;这一步只是请求，命令尚未执行。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;Runtime 接着解析参数、检查工具是否注册、验证命令与目录是否落在策略允许的范围；高风险动作可能进入人工审批。获准后，执行器才在指定环境里运行命令。标准输出、标准错误、退出码和超时状态构成工具结果。Runtime 用调用标识把结果关联到原请求，再送入下一轮模型输入。模型据此分析失败，或提出下一步。OpenAI Responses API 的函数调用示例使用 &lt;code&gt;call_id&lt;/code&gt; 关联 &lt;code&gt;function_call&lt;/code&gt; 与 &lt;code&gt;function_call_output&lt;/code&gt;；其他框架可能使用不同字段，但关联关系不可省略。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://cms.jaisong1n.com/wp-content/uploads/2026/10/figure-2.png&quot; alt=&quot;用户、Agent Runtime、模型服务、工具执行器与操作系统或外部服务之间的工具调用时序图。&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;图 2：步骤 3 只产生调用请求；步骤 4 检查策略并在需要时审批；步骤 6 才触及操作系统或外部服务；步骤 7、8 将结果交还模型。&lt;/p&gt;
+&lt;p&gt;用极简伪代码表达，基本循环是：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;while within_budget:                 # 教学示意，非某 SDK 可运行代码
+    response = model(context, tools)
+    if response.is_final: return response.answer
+    call = parse_and_validate(response.tool_call)
+    policy.authorize_or_ask(call)
+    result = dispatcher.execute(call)
+    context.add_tool_result(call.id, result)
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;“工具”还覆盖不同供给方式：Shell 和 File Tool 接触本地环境；Web Search、File Search 或托管代码工具可能由平台执行；开发者自定义 Function 可在应用侧运行；Computer Use 操作受控界面；Handoff 把任务交给另一 Agent。不能假设所有工具都在开发者电脑上跑。&lt;/p&gt;
+&lt;p&gt;MCP 是 Host/Client 与 Server 之间交换 tools、resources、prompts 的协议，不是某个工具本身；官方 &lt;a href=&quot;https://modelcontextprotocol.io/docs/2026-07-28/learn/architecture&quot;&gt;MCP 架构文档&lt;/a&gt;也明确它不规定应用怎样管理模型与上下文。Skill 则是特定平台组织任务规则或流程的机制，形式随产品变化；读取 Skill 不会凭空增加文件或网络权限。Tool 承担具体动作，MCP 提供连接方式，Skill 指导怎样使用能力。&lt;/p&gt;
+&lt;h2&gt;05｜工具执行与操作系统怎样相接&lt;/h2&gt;
+&lt;p&gt;一段工具处理代码可能直接在 Runtime 进程内运行函数；&lt;code&gt;subprocess&lt;/code&gt; 可创建子进程并通过管道收集输出；远程工具通过 HTTP/RPC 到另一台机器；容器或沙盒则在受限环境中运行代码。托管工具的执行位置由平台决定。模型服务、Runtime 和工具甚至可以分布在三处。&lt;/p&gt;
+&lt;p&gt;这对应 408 的进程、线程、系统调用、IPC、网络和调度。运行命令会涉及进程创建与等待；读取文件会触及文件系统接口；远程调用会产生网络 I/O；异步 Runtime 可以在等待结果时处理其他工作。&lt;strong&gt;“Agent 调用一次工具”不意味着“一定新建一个进程”&lt;/strong&gt;，也不意味着模型推理服务与工具共享一个地址空间。&lt;/p&gt;
+&lt;h2&gt;06｜为什么沙盒是重要边界&lt;/h2&gt;
+&lt;p&gt;工具一旦能够改文件、执行命令或访问网络，错误参数、恶意仓库内容和提示注入就可能转化为真实操作。普通子进程不是安全沙盒：它通常继承运行用户的一部分文件、网络与环境权限。隔离必须落在真实执行环境和权限系统上，例如限定可读写目录、限制出站网络、收紧凭据、限制资源与独立工作负载。&lt;a href=&quot;https://developers.openai.com/api/docs/guides/agents-api/environments/security&quot;&gt;OpenAI Agents API 的沙盒安全文档&lt;/a&gt;明确讨论工作负载隔离、网络限制和凭据分离。&lt;/p&gt;
+&lt;p&gt;几层防线职责不同：&lt;strong&gt;Tool Policy&lt;/strong&gt;决定哪些调用可进入执行器；&lt;strong&gt;Guardrails&lt;/strong&gt;检查输入输出或流程条件；&lt;strong&gt;Sandbox&lt;/strong&gt;限制代码运行时能接触的资源；&lt;strong&gt;Human Approval&lt;/strong&gt;把特定风险动作交给人确认。它们可以组合，不能互相替代。容器是一种打包与隔离技术，沙盒是安全目标及其约束集合，Runtime 是组织整个过程的软件层；三者不是同义词。提示词可以指导模型，却无法替代 OS 权限、服务端授权和执行器校验。&lt;/p&gt;
+&lt;p&gt;最小权限的实际含义是：只给当前任务必要的文件、网络和工具能力，凭据尽量留在执行环境之外，并让写操作有可检查的边界。隔离也不是绝对保证，具体强度要看部署配置与威胁模型。本文不把任何一项框架配置称作“安全已解决”。&lt;/p&gt;
+&lt;h2&gt;07｜从 Runtime 到 Agent Infra 与算法&lt;/h2&gt;
+&lt;p&gt;一个 &lt;code&gt;while&lt;/code&gt; 循环足以解释最小闭环，却无法独自处理长任务恢复、并发、工具副作用、审批、追踪与成本上限。Agent Infra 更关心这些执行机制的可靠性、延迟、资源与观测；Agent 算法更关心任务分解、策略选择、反馈利用和评测方法。边界并非职位划分，而是观察系统的两个角度。&lt;/p&gt;
+&lt;p&gt;执行轨迹记录了“模型看到什么、请求了什么、工具实际返回什么”，因此可以用于定位失败、构造评测和研究训练信号。但推理时得到一次工具反馈，只改变当前输入与状态；只有后续确实发生参数优化，才谈得上训练或强化学习。&lt;/p&gt;
+&lt;p&gt;我更愿意把 Agent 的可靠性写成一条责任链：&lt;strong&gt;模型提供候选能力，Runtime 组织执行，真实环境返回反馈，权限机制约束可发生的动作。&lt;/strong&gt; 更强的模型能改善判断，却不能替代健全的执行和授权系统。&lt;/p&gt;
+&lt;h2&gt;资料来源&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;a href=&quot;https://developers.openai.com/api/docs/guides/function-calling&quot;&gt;OpenAI，Function Calling&lt;/a&gt;、&lt;a href=&quot;https://developers.openai.com/api/docs/guides/tools&quot;&gt;Using tools&lt;/a&gt;：函数调用、调用标识和工具类别。&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://openai.com/index/unlocking-the-codex-harness/&quot;&gt;OpenAI，Unlocking the Codex Harness，2026-02-04&lt;/a&gt;；&lt;a href=&quot;https://developers.openai.com/api/docs/guides/agents/running-agents&quot;&gt;Agents SDK：Running agents&lt;/a&gt;；&lt;a href=&quot;https://developers.openai.com/api/docs/guides/agents-api/architecture&quot;&gt;Agents API：Architecture&lt;/a&gt;：公开的运行层选择。&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://developers.openai.com/api/docs/guides/agents/guardrails-approvals&quot;&gt;OpenAI，Guardrails and human review&lt;/a&gt;、&lt;a href=&quot;https://developers.openai.com/api/docs/guides/agents-api/environments/security&quot;&gt;Sandbox security&lt;/a&gt;、&lt;a href=&quot;https://developers.openai.com/api/docs/guides/agents-api/errors&quot;&gt;Errors and recovery&lt;/a&gt;：权限、隔离与恢复。&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://modelcontextprotocol.io/docs/2026-07-28/learn/architecture&quot;&gt;MCP，Architecture overview&lt;/a&gt;：协议参与者与职责边界。&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://docs.python.org/3/library/subprocess.html&quot;&gt;Python，subprocess 文档&lt;/a&gt;；&lt;a href=&quot;https://docs.vllm.ai/en/latest/design/paged_attention/&quot;&gt;vLLM，Paged Attention&lt;/a&gt;；&lt;a href=&quot;https://docs.sglang.io/&quot;&gt;SGLang 文档&lt;/a&gt;：工具进程和推理服务的一般机制。&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://www.anthropic.com/research/building-effective-agents&quot;&gt;Anthropic，Building effective agents，2024-12-19&lt;/a&gt;：工作流与 Agent 的常见结构对照；该页面注明部分工具生态描述已随时间变化。&lt;/li&gt;
+&lt;/ul&gt;
+</content:encoded></item><item><title>模型不是进程：从一次工具调用理解 Agent 如何运行</title><link>https://jaisong1n.com/posts/model-agent-process-tool-calling/</link><guid isPermaLink="true">https://jaisong1n.com/posts/model-agent-process-tool-calling/</guid><description>用一次 Codex 工具调用串起模型、Agent Runtime 与操作系统进程：请求由模型生成，执行由受控程序完成，父子进程与管道则属于 OS 层。</description><pubDate>Thu, 22 Oct 2026 11:18:06 GMT</pubDate><content:encoded>&lt;p&gt;假设我对 Codex 说：“读一下这个仓库，修复失败的测试，然后运行 &lt;code&gt;pytest&lt;/code&gt;。”屏幕上随后出现文件读取、补丁和终端输出。最容易产生的错觉是：GPT 模型像一个登录了电脑的程序，亲自打开文件并执行命令。&lt;/p&gt;
+&lt;p&gt;这个场景恰好适合用 408 操作系统知识拆开。&lt;strong&gt;模型给出下一步的候选动作，Agent Runtime 组织并约束动作，真正的读写与执行仍由程序、进程和操作系统完成。&lt;/strong&gt; 这几者没有固定的一对一关系。&lt;/p&gt;
+&lt;h2&gt;01｜从一次 Codex 工具执行说起&lt;/h2&gt;
+&lt;p&gt;“运行 &lt;code&gt;pytest&lt;/code&gt;”至少包含两个不同的问题：是否应该运行，以及谁来运行。模型可依据输入生成工具调用请求，例如工具名、命令和参数；请求本身还没有启动 &lt;code&gt;pytest&lt;/code&gt;。运行环境收到请求后，才会检查工具是否存在、参数是否合规、当前权限是否允许，再交给执行器。OpenAI 的 &lt;a href=&quot;https://developers.openai.com/api/docs/guides/function-calling&quot;&gt;Function Calling 文档&lt;/a&gt;把这条链路写成：提供工具、收到调用、应用侧执行、把结果送回模型、获得后续响应。OpenAI 对 &lt;a href=&quot;https://openai.com/index/unlocking-the-codex-harness/&quot;&gt;Codex Harness 的公开介绍&lt;/a&gt;也将 Agent Loop、工具执行与沙盒列为软件层职责。&lt;/p&gt;
+&lt;p&gt;本文只用公开接口和通用操作系统原理解释这个过程，不把示意流程当成 Codex 每个版本的内部调用栈。&lt;/p&gt;
+&lt;h2&gt;02｜模型、Agent 与进程分别是什么&lt;/h2&gt;
+&lt;p&gt;模型权重是训练得到的参数数据；推理服务加载权重并进行计算，接收输入后生成输出。权重文件不是正在运行的程序，也没有 PID。推理服务本身会运行在计算设备上的软件环境里，但不能据此说“一个模型等于一个进程”：服务可以有多个工作进程，也可以同时处理多个请求。&lt;/p&gt;
+&lt;p&gt;Agent 是围绕目标组织模型、上下文、工具与反馈的软件系统；Agent Runtime（也常称 Harness）是其中驱动执行的软件层。进程则是操作系统管理的一次程序执行，有地址空间、进程标识和内核维护的控制信息。课本里的 PCB（进程控制块）属于操作系统对进程的表示，模型权重并不是 PCB。一个 Agent 任务可能跨多个本地或远程进程；一个 Runtime 进程也可能承载多个任务。&lt;/p&gt;
+&lt;p&gt;所以这些词处于不同抽象层：模型描述计算能力，Agent 描述任务系统，Runtime 描述控制软件，进程描述 OS 资源管理单位。它们可以关联，却不能直接画等号。&lt;/p&gt;
+&lt;p&gt;还可以从“重启会发生什么”检验这个区分。推理服务进程重启，模型权重可以重新加载；Agent 任务是否能续接，取决于会话和执行状态有没有被保存；一个已经启动的测试子进程能否继续被管理，又取决于执行环境的生命周期。三个问题答案可能完全不同。如果把它们都称作“模型还在不在”，就会失去分析故障所需的层次。&lt;/p&gt;
+&lt;h2&gt;03｜一次工具调用如何闭环&lt;/h2&gt;
+&lt;p&gt;以运行测试为例，Runtime 先收集用户目标、相关文件和可用工具描述，向模型服务发出请求。模型若返回“调用终端工具，参数为运行 &lt;code&gt;pytest&lt;/code&gt;”，Runtime 要识别工具名、解析参数、应用权限策略，再把请求交给实际的工具执行器。执行器返回退出码、标准输出或错误摘要；Runtime 将这些结果与原来的调用关联，整理进下一轮输入。模型这时才有依据判断测试是否通过、是否还需修改。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://cms.jaisong1n.com/wp-content/uploads/2026/10/figure.png&quot; alt=&quot;从用户任务经 Agent Runtime 和模型推理服务，到工具执行环境与操作系统资源的流程图。&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;图 1：蓝框是 Agent Runtime 的逻辑职责；绿框表示工具实际运行的位置。模型输出调用请求，执行动作由 Runtime 授权后交给工具完成。&lt;/p&gt;
+&lt;p&gt;这里的“模型决定调用”是&lt;strong&gt;提出动作&lt;/strong&gt;，不是&lt;strong&gt;获得执行权&lt;/strong&gt;。即便模型生成了结构正确的命令，Runtime 也可以拒绝、要求审批或返回错误。反过来，工具执行完成也不意味着任务完成：模型可能依据失败输出继续定位问题。结果反馈改变的是下一轮输入和任务状态，不会自动修改模型参数。&lt;/p&gt;
+&lt;p&gt;调用请求也不能直接被当成可信程序输入。工具名需要匹配已注册能力，参数要满足类型与业务限制，命令与路径要符合当前任务权限。模型可能写错字段，也可能被仓库中的不可信文本诱导。把“模型建议”与“系统授权”分成两步，才能让调用链在错误发生时有明确的拒绝点。&lt;/p&gt;
+&lt;h2&gt;04｜工具究竟在哪里运行&lt;/h2&gt;
+&lt;p&gt;“调用工具”并不指定一种固定的 OS 形态。读取一个内存对象可能只是 Runtime 进程内的函数调用；运行 &lt;code&gt;pytest&lt;/code&gt; 通常会启动子进程；搜索网页可能由远程服务执行，Runtime 只发网络请求。有些工具在容器或独立沙盒里运行。&lt;strong&gt;一次工具调用不必对应一次新进程。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;下面的 Python 代码可以在有 Python 3 的 Windows、Linux 或 macOS 终端中运行。它用 &lt;code&gt;subprocess.run&lt;/code&gt; 启动一个子 Python 解释器，再收集输出和退出码：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;import os
+import subprocess
+import sys
+
+result = subprocess.run(
+    [sys.executable, &quot;-c&quot;,
+     &quot;import os; print(&apos;child PID:&apos;, os.getpid()); &quot;
+     &quot;print(&apos;parent PID:&apos;, os.getppid())&quot;],
+    capture_output=True, text=True, check=False,
+)
+print(&quot;runner PID:&quot;, os.getpid())
+print(result.stdout, end=&quot;&quot;)
+print(&quot;exit code:&quot;, result.returncode)
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;在 Windows、Python 3.10.3 上的一次实际运行输出（PID 每次运行都会变化）：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;runner PID: 4500
+child PID: 27060
+parent PID: 4500
+exit code: 0
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;Python &lt;a href=&quot;https://docs.python.org/3/library/subprocess.html&quot;&gt;subprocess 文档&lt;/a&gt;明确说明了新进程、标准输入输出管道与返回码。这个例子能证明父子进程和结果回收，却不能证明子进程已被安全隔离：它默认仍能使用所属用户拥有的文件与网络权限。代码里的“runner”只是本例的父 Python 程序，并非 Codex 的真实进程；这些 PID 也只属于这次实验。&lt;/p&gt;
+&lt;h2&gt;05｜回到 408 操作系统&lt;/h2&gt;
+&lt;p&gt;408 里的“程序”是待执行的指令与数据；“进程”是其运行实例。执行器启动测试时，操作系统创建进程并维护 PID、状态、地址空间等信息。Python 父进程等待 &lt;code&gt;subprocess.run&lt;/code&gt; 返回时可能阻塞；子进程退出后，父进程从管道读取输出并得到退出码。若 Runtime 采用异步 I/O，它也可以在等待时处理其他任务。阻塞、就绪和运行是调度状态，不是模型的思考状态。&lt;/p&gt;
+&lt;p&gt;“父子进程”在不同系统上的实现细节也不同。Linux 可用 &lt;code&gt;fork()&lt;/code&gt; 创建子进程，再用 &lt;code&gt;exec&lt;/code&gt; 家族装载程序；&lt;a href=&quot;https://man7.org/linux/man-pages/man2/fork.2.html&quot;&gt;Linux &lt;code&gt;fork(2)&lt;/code&gt; 手册&lt;/a&gt;说明父子具有不同 PID 和独立地址空间。Windows 常见的是直接通过 &lt;a href=&quot;https://learn.microsoft.com/en-us/windows/win32/procthread/creating-processes&quot;&gt;&lt;code&gt;CreateProcess&lt;/code&gt;&lt;/a&gt; 创建新进程。Python 提供统一的 &lt;code&gt;subprocess&lt;/code&gt; 接口，不代表底层两个平台走完全相同的系统调用。&lt;/p&gt;
+&lt;p&gt;文件读取、进程创建、管道与网络通信最终都依赖操作系统接口。模型并不持有一个神奇的“直接操作磁盘”通道；把模型输出变为受限的系统行为，是 Runtime 和工具软件的工作。&lt;/p&gt;
+&lt;p&gt;还有一个容易混淆的点：进程状态描述的是 CPU 调度，不描述 Agent 的业务进度。测试进程等待磁盘读取时可能阻塞；I/O 完成后进入就绪队列，等 CPU 分配时间片继续运行。与此同时，Agent 的“等待工具结果”只是上层任务状态。把这两张状态图分开，才能解释为什么界面看似停住，后台却可能在等待网络、审批或子进程，而不是模型持续占用 CPU。&lt;/p&gt;
+&lt;h2&gt;06｜重新理解 Agent&lt;/h2&gt;
+&lt;p&gt;读到这里，三个常见误解就可以拆开。第一，Agent 不是 OS 进程：一个任务可跨进程、机器与服务。第二，产品里的 Agent Thread 通常指会话或任务历史，不等于操作系统线程；OpenAI 对 Codex 的公开说明就把 thread 定义为用户与 Agent 的一次会话及其持久事件历史。第三，工具返回新信息后继续推理，只是在新上下文上再次运行模型，不等于发生了参数训练。&lt;/p&gt;
+&lt;p&gt;我认为这个区分很实用。排查一次失败时，先问“是模型提出了错误动作、Runtime 错误分发、工具失败，还是 OS/网络拒绝访问”，比笼统地说“Agent 没跑起来”更容易定位问题。下一篇将继续沿这条边界，拆开 Agent Runtime 内部如何管理状态、工具、权限与恢复。&lt;/p&gt;
+&lt;h2&gt;资料来源&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;a href=&quot;https://developers.openai.com/api/docs/guides/function-calling&quot;&gt;OpenAI，Function Calling&lt;/a&gt;：工具调用闭环与调用结果关联。&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://openai.com/index/unlocking-the-codex-harness/&quot;&gt;OpenAI，Unlocking the Codex Harness，2026-02-04&lt;/a&gt;：公开的 Agent Loop、线程与工具执行职责。&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://docs.python.org/3/library/subprocess.html&quot;&gt;Python，subprocess 文档&lt;/a&gt;：子进程、管道与返回码。&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://man7.org/linux/man-pages/man2/fork.2.html&quot;&gt;Linux man-pages，fork(2)&lt;/a&gt;；&lt;a href=&quot;https://learn.microsoft.com/en-us/windows/win32/procthread/creating-processes&quot;&gt;Microsoft，Create processes&lt;/a&gt;：平台进程创建差异。&lt;/li&gt;
+&lt;/ul&gt;
+</content:encoded></item><item><title>REA：当 Agent 开始理解没有源码的软件</title><link>https://jaisong1n.com/posts/rea-agent-understanding-software-without-source/</link><guid isPermaLink="true">https://jaisong1n.com/posts/rea-agent-understanding-software-without-source/</guid><description>REA 扩展了 Agent 分析没有源码的软件的能力。本文从本地数据库与云端信息的边界出发，区分理解程序、复现功能与重建系统，并讨论证据与验证的局限。</description><pubDate>Mon, 19 Oct 2026 02:35:09 GMT</pubDate><content:encoded>&lt;p&gt;&lt;em&gt;本文基于 REA 官方项目文档与仓库源码撰写，属于技术观察。我尚未亲自使用 REA。文中的调查过程是说明方法的假设示例，不是实测记录。本文讨论的是查阅时的仓库内容；仓库主分支与已发布软件包可能存在能力差异。&lt;/em&gt;&lt;/p&gt;
 &lt;h2&gt;从 REA 说起：为什么逆向工程项目会引起 Agent 开发者的关注？&lt;/h2&gt;
 &lt;p&gt;给 Agent 一个开源项目，它可以搜索代码、阅读文档，沿着函数调用寻找答案。但如果问题变成“这个没有源码的应用，搜索功能是怎样工作的”，常用的阅读路径就中断了。&lt;/p&gt;
 &lt;p&gt;软件仍会留下线索。安装包里有文件和资源，二进制程序里有指令和字符串，运行中的应用会对输入作出反应。困难在于，这些线索不能像一份设计文档那样直接阅读，需要借助专业工具提取、关联和解释。&lt;/p&gt;
