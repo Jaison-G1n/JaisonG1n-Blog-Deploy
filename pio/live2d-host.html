@@ -18,6 +18,7 @@
   var floatingContentPadding = 12;
   var layoutObserver = null;
   var layoutFrame = 0;
+  var lastHitPath = '';
 
   var menuActions = {
     home: function() { parent.postMessage({ type: 'l2d-action', action: 'home' }, '*'); },
@@ -25,8 +26,44 @@
     sleep: function(w) { w.sleep(); },
   };
 
+  function getHitPath() {
+    var canvas = document.querySelector('canvas');
+    if (!canvas) return '';
+    var rect = canvas.getBoundingClientRect();
+    var x = rect.left;
+    var y = rect.top;
+    var w = rect.width;
+    var h = rect.height;
+    if (!w || !h) return '';
+    var path = [
+      'M ' + (x + w * 0.22) + ' ' + (y + h * 0.31),
+      'L ' + (x + w * 0.75) + ' ' + (y + h * 0.31),
+      'L ' + (x + w * 0.82) + ' ' + (y + h * 0.5),
+      'L ' + (x + w * 0.87) + ' ' + (y + h),
+      'L ' + (x + w * 0.13) + ' ' + (y + h),
+      'L ' + (x + w * 0.18) + ' ' + (y + h * 0.5),
+      'Z'
+    ];
+    function addBox(el) {
+      if (!el) return;
+      var style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return;
+      var box = el.getBoundingClientRect();
+      if (!box.width || !box.height) return;
+      path.push('M ' + (box.left - 4) + ' ' + (box.top - 4) +
+        ' H ' + (box.right + 4) + ' V ' + (box.bottom + 4) +
+        ' H ' + (box.left - 4) + ' Z');
+    }
+    var bubble = canvas.nextElementSibling;
+    addBox(bubble && bubble.firstElementChild);
+    var menu = bubble && bubble.nextElementSibling;
+    if (menu && getComputedStyle(menu).pointerEvents !== 'none') addBox(menu);
+    return path.join(' ');
+  }
+
   function notifyLoaded() {
-    parent.postMessage({ type: 'l2d-loaded', contentHeight: lastContentHeight }, '*');
+    lastHitPath = getHitPath();
+    parent.postMessage({ type: 'l2d-loaded', contentHeight: lastContentHeight, hitPath: lastHitPath }, '*');
   }
 
   function getWidgetHeight(size) {
@@ -57,7 +94,8 @@
     var nextHeight = measuredHeight > baseContentHeight
       ? measuredHeight + floatingContentPadding
       : baseContentHeight;
-    if (nextHeight === lastContentHeight) return;
+    var hitPath = getHitPath();
+    if (nextHeight === lastContentHeight && hitPath === lastHitPath) return;
     lastContentHeight = nextHeight;
     notifyLoaded();
   }
@@ -96,6 +134,7 @@
     }
     widgetInstance = null;
     widgetLoaded = false;
+    lastHitPath = '';
     if (layoutObserver) layoutObserver.disconnect();
     layoutObserver = null;
     cancelAnimationFrame(layoutFrame);
