@@ -1,4 +1,59 @@
-<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>JaisonG1n</title><description>Code, AI and Everything in Between</description><link>https://jaisong1n.com/</link><language>zh_CN</language><item><title>深入理解 Agent Runtime：模型、执行环境、工具调用与沙盒安全</title><link>https://jaisong1n.com/posts/understanding-agent-runtime-tool-calling-sandbox/</link><guid isPermaLink="true">https://jaisong1n.com/posts/understanding-agent-runtime-tool-calling-sandbox/</guid><description>从模型推理服务到 Agent Runtime，拆解状态、工具分发、执行环境、调用时序与沙盒权限，说明模型输出怎样变成可控行动。</description><pubDate>Thu, 22 Oct 2026 11:18:15 GMT</pubDate><content:encoded>&lt;p&gt;同样接入 GPT，为什么一个应用只能回答问题，Codex 却能读取仓库、改文件和运行命令？差异不只在模型。模型生成内容或工具调用请求；把请求变成可执行、可限制、可追踪的行动，需要另一层软件。我把这层称为 &lt;strong&gt;Agent Runtime&lt;/strong&gt;，也可叫 Harness。&lt;/p&gt;
+<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>JaisonG1n</title><description>Code, AI and Everything in Between</description><link>https://jaisong1n.com/</link><language>zh_CN</language><item><title>Agent 等待工具时，CPU 在干什么？从阻塞到异步理解 Runtime</title><link>https://jaisong1n.com/posts/agent-runtime-sync-async-io-wait/</link><guid isPermaLink="true">https://jaisong1n.com/posts/agent-runtime-sync-async-io-wait/</guid><description>从一段真实的 Python 子进程实验出发，解释工具等待时的线程状态、同步与异步、阻塞与非阻塞，以及 Agent Runtime 如何在等待期间安排其他任务。</description><pubDate>Tue, 27 Oct 2026 04:38:52 GMT</pubDate><content:encoded>&lt;h2&gt;01｜Codex 为什么需要等待工具&lt;/h2&gt;
+&lt;p&gt;我让 Codex 运行测试时，常会看到它停在“等待工具结果”这一步。终端里的 &lt;code&gt;pytest&lt;/code&gt; 可能还在跑，远程数据也可能还没返回。此时屏幕没有新文字，不代表 CPU 正替模型一刻不停地“思考”。那么，等待到底发生在哪里？等待期间还能做别的事吗？&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://jaisong1n.com/posts/model-agent-process-tool-calling/&quot;&gt;上一篇关于模型与进程的文章&lt;/a&gt;把模型提出动作、Runtime 执行工具和操作系统运行进程分开了。这里继续沿着工具调用往下看：当工具需要两秒才返回，Runtime 如何度过这两秒？&lt;/p&gt;
+&lt;h2&gt;02｜等待时，操作系统在做什么&lt;/h2&gt;
+&lt;p&gt;408 操作系统里的经典三状态模型把进程分为运行态、就绪态和阻塞态。运行态正在占用 CPU；就绪态具备运行条件，只是还没轮到 CPU；阻塞态在等某个事件，例如 I/O 完成。事件到来后，它通常先回到就绪态，再由调度器安排运行。现代系统的实际调度通常以线程为单位，三状态模型是理解等待的起点，不能把它机械地套在整个多线程进程上。&lt;/p&gt;
+&lt;p&gt;在我的 Python 实验里，父进程用 &lt;code&gt;subprocess.run()&lt;/code&gt; 启动一个会休眠约两秒的子进程。这个调用直到子进程结束才返回；&lt;a href=&quot;https://docs.python.org/3.12/library/subprocess.html#subprocess.run&quot;&gt;Python 官方文档&lt;/a&gt;也明确说 &lt;code&gt;run()&lt;/code&gt; 会等待命令完成。父进程的&lt;strong&gt;调用线程&lt;/strong&gt;在等待过程中不能继续执行后面的 Python 语句。具体底层等待路径取决于平台和实现，不能仅凭这个程序断言它在每一瞬间处于哪个内核状态。但这种等待并不要求它循环检查、持续烧满一个 CPU 核心。&lt;/p&gt;
+&lt;p&gt;“阻塞等待”和“忙等待”区别正在这里。忙等待会反复检查条件，检查本身消耗 CPU；阻塞等待让调用线程在条件未满足时暂停，由系统在事件发生后唤醒它。Windows 的 &lt;a href=&quot;https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject&quot;&gt;&lt;code&gt;WaitForSingleObject&lt;/code&gt; 文档&lt;/a&gt;说明，等待对象未收到信号时，调用线程会进入等待状态。这是 Windows 等待机制的例子，&lt;strong&gt;不是对这段 Python 代码内部具体调用链的断言&lt;/strong&gt;。Linux 的 &lt;a href=&quot;https://man7.org/linux/man-pages/man2/waitpid.2.html&quot;&gt;&lt;code&gt;waitpid(2)&lt;/code&gt;&lt;/a&gt;则展示了另一平台等待子进程状态变化的接口，不能把它写成 Windows 上运行的系统调用。&lt;/p&gt;
+&lt;p&gt;子进程仍可由操作系统调度，其他进程和线程也可运行。一个进程中的一个线程被阻塞，不意味着它的所有线程都停止。反过来，如果这恰好是负责某段业务逻辑的唯一线程，那段逻辑确实会停在当前调用处。CPU 此时可能运行子进程、浏览器或其他工作，也可能在没有可运行任务时空闲；单看终端的等待画面，无法测出整台机器的 CPU 状态。&lt;/p&gt;
+&lt;h2&gt;03｜同步、异步与阻塞，是两组问题&lt;/h2&gt;
+&lt;p&gt;&lt;strong&gt;同步／异步&lt;/strong&gt;主要描述结果如何交付、调用者如何组织后续工作：同步调用通常沿当前调用链等到结果再继续；异步调用把未完成的工作交给运行环境管理，调用者可以在结果到来前安排其他工作。&lt;strong&gt;阻塞／非阻塞&lt;/strong&gt;主要描述一次等待会不会让当前执行单元停在那里。它们相关，但并非同一组同义词。同步 API 可以配合轮询式的非阻塞检查；异步函数内部如果直接执行长时间阻塞的普通函数，也仍会卡住事件循环。&lt;/p&gt;
+&lt;p&gt;例如 &lt;code&gt;subprocess.run()&lt;/code&gt; 对当前调用线程提供同步、等待完成的接口。下面实验里的 &lt;code&gt;asyncio.create_subprocess_exec()&lt;/code&gt; 启动子进程后，&lt;code&gt;await process.communicate()&lt;/code&gt; 等待它结束并读取管道；等待期间当前&lt;strong&gt;协程&lt;/strong&gt;暂停，事件循环可以运行别的任务。&lt;a href=&quot;https://docs.python.org/3.12/library/asyncio-task.html#task-object&quot;&gt;Python 的 Task 文档&lt;/a&gt;说得很具体：事件循环采用协作式调度，一个循环一次运行一个 Task；Task 等待 Future 时，循环可运行其他 Task 或处理 I/O。&lt;a href=&quot;https://docs.python.org/3.12/library/asyncio-task.html#asyncio.sleep&quot;&gt;&lt;code&gt;asyncio.sleep()&lt;/code&gt;&lt;/a&gt;也会主动挂起当前 Task。&lt;/p&gt;
+&lt;p&gt;这说明 &lt;code&gt;async def&lt;/code&gt; 只定义协程函数，并不自动启动一个线程；&lt;code&gt;await&lt;/code&gt; 是一个可能交还控制权的协作点，不意味着多个 CPU 核心同时执行这几个协程。若在单个事件循环线程中直接做耗时的纯 CPU 计算而不让出控制权，其他协程仍会等它完成。需要并行计算时，必须另外设计进程、线程或其他执行资源；给函数加上 &lt;code&gt;async&lt;/code&gt; 不是加速开关。&lt;/p&gt;
+&lt;p&gt;我把“非阻塞”也理解得更谨慎：一次非阻塞操作可以很快告知“结果尚未就绪”，但程序还需要决定何时再检查或如何接收通知。如果只是 &lt;code&gt;while&lt;/code&gt; 循环不停重试，仍可能变成忙等待。事件循环利用可等待的事件与回调管理进度，关键收益是让等待不妨碍其他协程推进，而不是消灭等待本身。&lt;/p&gt;
+&lt;h2&gt;04｜把这套机制放回 Agent Runtime&lt;/h2&gt;
+&lt;p&gt;一个 Agent Runtime 要维护 Agent Loop：收集上下文、发起模型请求、解析工具调用、执行工具、收集结果，再决定下一步。若工具是慢命令或远程服务，它可以把等待登记为一个未完成的任务，在相应的 &lt;code&gt;await&lt;/code&gt; 处暂停这条任务路径，转去处理其他会话、通知或已经就绪的工具结果。这里的“调度”是应用程序选择哪个任务继续；操作系统调度的是哪些线程获得 CPU。两者处在不同层级。&lt;/p&gt;
+&lt;p&gt;多个工具也并非总能一起发起。两次独立查询可能适合并发；如果第二个工具的参数依赖第一个工具的输出，就必须先拿到前者结果。即便相互独立，共享文件、端口或速率限制也可能要求串行或限流。异步机制提供安排任务的能力，是否并发要由依赖关系、权限和资源约束决定。&lt;/p&gt;
+&lt;p&gt;模型服务与工具执行环境同样要分开看。Runtime 等工具时，模型服务&lt;strong&gt;不一定&lt;/strong&gt;一直在为这次请求推理；一种常见流程是先得到工具调用请求，待工具结果回传后再发起下一轮推理。但不同系统实现可能不同，不能从一次 Python 子进程实验反推 Codex 内部具体的资源占用方式。&lt;a href=&quot;https://docs.python.org/3.12/library/asyncio-subprocess.html&quot;&gt;Python 的异步子进程文档&lt;/a&gt;能支持本文关于 &lt;code&gt;asyncio&lt;/code&gt; 的机制说明，不能单独证明某个 Agent 产品如何部署。&lt;/p&gt;
+&lt;h2&gt;05｜我的两秒 Python 实验&lt;/h2&gt;
+&lt;p&gt;2026 年 10 月 26 日，我在 Windows、PyCharm、Python 3.12 中运行了 &lt;code&gt;day2_agent_wait.py&lt;/code&gt;。这里没有接入大模型，也没有真实的 Agent 工具协议；子 Python 进程先 &lt;code&gt;sleep(2)&lt;/code&gt; 再打印“工具执行完成”，只是模拟一个耗时工具。同步部分的核心代码如下，代码与实验文件一致：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;result = subprocess.run(
+    [sys.executable, &quot;-c&quot;, CHILD],
+    capture_output=True,
+    text=True,
+    encoding=&quot;utf-8&quot;,
+    env=CHILD_ENV,
+    check=True,
+)
+print(result.stdout.strip())
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;code&gt;run()&lt;/code&gt; 返回后才会打印子进程输出。异步部分先创建子进程，再创建一个 heartbeat Task；主协程等待子进程输出时，heartbeat 仍有机会运行：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;process = await asyncio.create_subprocess_exec(
+    sys.executable, &quot;-c&quot;, CHILD,
+    stdout=asyncio.subprocess.PIPE,
+)
+other_task = asyncio.create_task(heartbeat())
+stdout, _ = await process.communicate()
+await other_task
+print(stdout.decode(&quot;utf-8&quot;).strip())
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;code&gt;heartbeat()&lt;/code&gt; 循环四次：每次打印 &lt;code&gt;Runtime 处理其他任务：i&lt;/code&gt;，随后 &lt;code&gt;await asyncio.sleep(0.5)&lt;/code&gt;。这里的 &lt;code&gt;Runtime&lt;/code&gt; 是我给模拟任务起的输出文字，不是一个真实 Agent Runtime。我的实际记录是：同步输出“工具执行完成”，耗时 &lt;strong&gt;2.16 秒&lt;/strong&gt;；异步先打印 &lt;code&gt;Runtime 处理其他任务：0&lt;/code&gt; 到 &lt;code&gt;3&lt;/code&gt;，再打印“工具执行完成”，耗时 &lt;strong&gt;2.13 秒&lt;/strong&gt;，整个程序退出码为 0。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://cms.jaisong1n.com/wp-content/uploads/2026/10/figure-3.png&quot; alt=&quot;同步调用线程等待约两秒才继续；异步主协程等待同一类子进程时，heartbeat 协程在事件循环中打印四次。&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;图 1：两次单工具实验的概念时间线。工具耗时基本相同；异步等待允许 heartbeat 推进。图中的刻度不是 CPU 调度采样，协程并发也不代表多核并行。&lt;/p&gt;
+&lt;p&gt;两次结果相差 0.03 秒，远不足以证明异步让这个工具变快。这个实验验证的是：&lt;strong&gt;等待同一个子进程期间，另一个协程确实取得了执行机会&lt;/strong&gt;。其中 &lt;code&gt;await other_task&lt;/code&gt; 还保证 heartbeat 完成后才打印最终结果；它并不代表两个独立工具已做过并发对照。&lt;/p&gt;
+&lt;p&gt;第一次尝试还碰到 &lt;code&gt;UnicodeDecodeError: &apos;gbk&apos; codec can&apos;t decode byte 0xa1&lt;/code&gt;。这提醒我：管道传的是字节，父进程要用与子进程输出相符的编码解码。实验文件为同步 &lt;code&gt;subprocess.run()&lt;/code&gt; 设置了 &lt;code&gt;encoding=&quot;utf-8&quot;&lt;/code&gt;，并通过 &lt;code&gt;env=CHILD_ENV&lt;/code&gt; 把 &lt;code&gt;PYTHONIOENCODING=utf-8&lt;/code&gt; 传给同步子进程；异步路径则用 &lt;code&gt;stdout.decode(&quot;utf-8&quot;)&lt;/code&gt; 解码。&lt;strong&gt;当前文件的异步 &lt;code&gt;create_subprocess_exec()&lt;/code&gt; 没有传入 &lt;code&gt;env=CHILD_ENV&lt;/code&gt;&lt;/strong&gt;，所以不能声称这条路径已显式固定了子进程的 UTF-8 输出编码。它在这次 Windows 环境运行成功，但在默认输出编码不同的环境中可能再次出错；若要增强可移植性，可以再给异步调用传入 &lt;code&gt;env=CHILD_ENV&lt;/code&gt;，这属于待验证的改进，不是这次实测代码。&lt;a href=&quot;https://docs.python.org/3.12/library/subprocess.html#frequently-used-arguments&quot;&gt;Python 文档对 &lt;code&gt;encoding&lt;/code&gt; 与 &lt;code&gt;env&lt;/code&gt; 参数的说明&lt;/a&gt;也分别对应父进程文本解码和子进程环境设置。&lt;/p&gt;
+&lt;h2&gt;06｜我现在如何理解“等待”&lt;/h2&gt;
+&lt;p&gt;这次实验让我把三件事分清了。Agent 等工具不要求 CPU 为这次请求忙等；同步调用让当前线程停在调用点，异步等待则让事件循环有机会推进其他协程。异步改善的是等待期间的任务组织和潜在并发能力，&lt;strong&gt;不会自动缩短单项工具执行时间&lt;/strong&gt;。这套能力来自 Runtime、操作系统和具体 I/O 接口的配合，而不是模型生成文本本身。&lt;/p&gt;
+&lt;p&gt;下一个值得真正动手的问题是：当 Agent 同时调用两个&lt;strong&gt;彼此独立&lt;/strong&gt;的工具时，异步并发能否明显缩短总完成时间？我还没有做串行与并发的双工具对照；在测量之前，它只能是后续实验方向。&lt;/p&gt;
+&lt;h3&gt;参考资料&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;a href=&quot;https://docs.python.org/3.12/library/subprocess.html&quot;&gt;Python 3.12 &lt;code&gt;subprocess&lt;/code&gt; 文档&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://docs.python.org/3.12/library/asyncio-task.html&quot;&gt;Python 3.12 &lt;code&gt;asyncio&lt;/code&gt; Tasks 文档&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://docs.python.org/3.12/library/asyncio-subprocess.html&quot;&gt;Python 3.12 &lt;code&gt;asyncio&lt;/code&gt; Subprocess 文档&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject&quot;&gt;Microsoft &lt;code&gt;WaitForSingleObject&lt;/code&gt; 文档&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://man7.org/linux/man-pages/man2/waitpid.2.html&quot;&gt;Linux &lt;code&gt;waitpid(2)&lt;/code&gt; 手册&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+</content:encoded></item><item><title>深入理解 Agent Runtime：模型、执行环境、工具调用与沙盒安全</title><link>https://jaisong1n.com/posts/understanding-agent-runtime-tool-calling-sandbox/</link><guid isPermaLink="true">https://jaisong1n.com/posts/understanding-agent-runtime-tool-calling-sandbox/</guid><description>从模型推理服务到 Agent Runtime，拆解状态、工具分发、执行环境、调用时序与沙盒权限，说明模型输出怎样变成可控行动。</description><pubDate>Thu, 22 Oct 2026 11:18:15 GMT</pubDate><content:encoded>&lt;p&gt;同样接入 GPT，为什么一个应用只能回答问题，Codex 却能读取仓库、改文件和运行命令？差异不只在模型。模型生成内容或工具调用请求；把请求变成可执行、可限制、可追踪的行动，需要另一层软件。我把这层称为 &lt;strong&gt;Agent Runtime&lt;/strong&gt;，也可叫 Harness。&lt;/p&gt;
 &lt;p&gt;上一篇从操作系统角度说明“模型不是进程”。这次向上看一层：Runtime 如何连接推理服务、任务状态、工具与真实环境，以及为何安全策略必须落在可执行的软件边界上。下文的组件图是教学划分，不是任何厂商公开的完整生产部署图。&lt;/p&gt;
 &lt;h2&gt;01｜为什么强模型仍需要 Runtime&lt;/h2&gt;
 &lt;p&gt;让模型回答“如何运行测试”，它可以生成命令文本；让 Agent 真正运行测试，还要知道工作目录、可用工具、参数格式、文件权限、超时和失败后的处理方式。模型无法仅凭权重取得仓库访问权。OpenAI 的 &lt;a href=&quot;https://developers.openai.com/api/docs/guides/function-calling&quot;&gt;Function Calling 文档&lt;/a&gt;区分模型返回的调用请求和应用侧执行；&lt;a href=&quot;https://openai.com/index/unlocking-the-codex-harness/&quot;&gt;Codex Harness 文章&lt;/a&gt;公开描述了 Agent Loop、线程持久化、工具执行、认证与沙盒等软件职责。&lt;/p&gt;
