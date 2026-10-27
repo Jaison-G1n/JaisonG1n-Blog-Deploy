@@ -1,4 +1,79 @@
-<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>JaisonG1n</title><description>Code, AI and Everything in Between</description><link>https://jaisong1n.com/</link><language>zh_CN</language><item><title>Agent 等待工具时，CPU 在干什么？从阻塞到异步理解 Runtime</title><link>https://jaisong1n.com/posts/agent-runtime-sync-async-io-wait/</link><guid isPermaLink="true">https://jaisong1n.com/posts/agent-runtime-sync-async-io-wait/</guid><description>从一段真实的 Python 子进程实验出发，解释工具等待时的线程状态、同步与异步、阻塞与非阻塞，以及 Agent Runtime 如何在等待期间安排其他任务。</description><pubDate>Tue, 27 Oct 2026 04:38:52 GMT</pubDate><content:encoded>&lt;h2&gt;01｜Codex 为什么需要等待工具&lt;/h2&gt;
+<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>JaisonG1n</title><description>Code, AI and Everything in Between</description><link>https://jaisong1n.com/</link><language>zh_CN</language><item><title>模型下达命令后，谁真正动手？从系统调用理解 Agent 工具执行</title><link>https://jaisong1n.com/posts/agent-tool-execution-system-calls/</link><guid isPermaLink="true">https://jaisong1n.com/posts/agent-tool-execution-system-calls/</guid><description>从一次模拟工具调用的 Python 实验出发，沿着模型、Runtime、执行器与操作系统的链路，理解系统调用、文件描述符和子进程。</description><pubDate>Tue, 27 Oct 2026 16:22:04 GMT</pubDate><content:encoded>&lt;h2&gt;01｜模型说要执行命令，谁真正动手？&lt;/h2&gt;
+&lt;p&gt;我让 Codex 读取一个文件，或者运行 &lt;code&gt;pytest&lt;/code&gt; 时，界面上很快会出现文件内容和测试结果。看起来像是模型“执行了命令”。但从模型生成文字到计算机打开文件，中间其实隔着几层软件。&lt;/p&gt;
+&lt;p&gt;上一篇我关注的是&lt;a href=&quot;https://jaisong1n.com/posts/agent-runtime-sync-async-io-wait/&quot;&gt;工具执行期间的等待&lt;/a&gt;；这次我想追问执行本身：工具请求如何变成文件访问或子进程？这里的“模型下达命令”是方便理解的说法。模型通常生成一份结构化的工具调用请求，是否真的执行，要经过应用侧处理。&lt;/p&gt;
+&lt;h2&gt;02｜从自然语言到真实操作&lt;/h2&gt;
+&lt;p&gt;一种典型链路是：用户提出任务，Runtime 将上下文和可用工具信息提供给模型；模型返回工具名称与参数；Runtime 解析请求、检查参数和权限，再交给相应执行器。工具返回结果后，Runtime 把结果组织进后续模型输入。&lt;a href=&quot;https://developers.openai.com/api/docs/guides/function-calling&quot;&gt;OpenAI 的 Function Calling 文档&lt;/a&gt;展示了应用执行函数并向模型回传结果的流程。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://cms.jaisong1n.com/wp-content/uploads/2026/10/figure.png&quot; alt=&quot;用户任务经 Agent Runtime 与模型服务生成工具请求，执行环境使用操作系统资源，工具结果返回 Runtime 的流程图。&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;图 1：模型生成调用请求，Runtime 负责校验和分发，工具执行环境负责实际操作，并将结果送回 Runtime。这是通用教学模型，不代表某个产品的具体部署拓扑。&lt;/p&gt;
+&lt;p&gt;工具可以是当前进程中的函数、外部子进程，也可以是远程服务。一次 Tool Calling 是应用层的请求与结果流程，并不必然创建新进程，也不必然对应一次系统调用（System Call）。例如纯内存计算可能在用户态完成；读取本地文件则需要借助操作系统的文件服务。远程工具的实际动作还可能发生在另一台机器上。&lt;/p&gt;
+&lt;h2&gt;03｜用户态、内核态与系统调用&lt;/h2&gt;
+&lt;p&gt;操作系统需要让应用使用文件、内存和设备，又不能让任意程序直接改写内核数据。CPU 的特权机制提供了区分：普通应用代码通常运行在&lt;strong&gt;用户态&lt;/strong&gt;（User Mode），关键内核代码运行在&lt;strong&gt;内核态&lt;/strong&gt;（Kernel Mode）。&lt;a href=&quot;https://learn.microsoft.com/en-us/windows-hardware/drivers/gettingstarted/user-mode-and-kernel-mode&quot;&gt;Microsoft 对 Windows 用户态与内核态的说明&lt;/a&gt;介绍了这种隔离及应用的独立虚拟地址空间。&lt;/p&gt;
+&lt;p&gt;这不是“普通用户”和“管理员”的另一种说法。管理员账户拥有更高的操作系统权限，但它启动的普通应用仍通常在用户态运行；账户权限回答“允许访问哪些资源”，CPU 运行模式回答“代码以什么特权执行”。两者都影响安全，却属于不同层次。&lt;/p&gt;
+&lt;p&gt;应用需要受保护的系统服务时，会通过操作系统规定的接口提出请求，由内核检查并完成相应工作。&lt;strong&gt;系统调用是用户程序进入内核服务的一类受控入口&lt;/strong&gt;，不是把模型生成的文字直接交给 CPU 执行。一次普通函数调用可能只在当前进程内计算；操作系统 API 则是程序使用系统功能的接口，库函数或 API 的实现可能进一步使用一个或多个系统调用。不同平台的封装和具体路径不同，不能把 Python 的每一次函数调用都等同于一次固定的系统调用指令。&lt;/p&gt;
+&lt;p&gt;以读取文件为例，路径最终需要交给底层文件服务，由操作系统根据权限等条件处理；数据可能来自文件系统缓存，因此一次读取也不一定触发物理磁盘访问。只看 Python 源码或这次程序输出，无法知道实际发生了哪些内核调用、每次模式切换或硬件访问；这些需要另行追踪。&lt;/p&gt;
+&lt;h2&gt;04｜读取文件与启动程序有什么区别&lt;/h2&gt;
+&lt;p&gt;在 Unix/Linux 中，打开文件后，进程通常通过&lt;strong&gt;文件描述符&lt;/strong&gt;（File Descriptor，FD）这个小整数引用已打开的 I/O 资源。&lt;a href=&quot;https://man7.org/linux/man-pages/man2/open.2.html&quot;&gt;Linux &lt;code&gt;open(2)&lt;/code&gt; 手册&lt;/a&gt;说明了打开文件后返回描述符；常见约定中 &lt;code&gt;0&lt;/code&gt;、&lt;code&gt;1&lt;/code&gt;、&lt;code&gt;2&lt;/code&gt; 分别对应标准输入、标准输出和标准错误。它们是进程使用的引用，不是文件内容，也不是全系统唯一的文件编号。&lt;/p&gt;
+&lt;p&gt;Python 的 &lt;a href=&quot;https://docs.python.org/3.12/library/os.html#os.open&quot;&gt;&lt;code&gt;os.open()&lt;/code&gt;、&lt;code&gt;os.read()&lt;/code&gt; 和 &lt;code&gt;os.close()&lt;/code&gt;&lt;/a&gt;提供低级文件 I/O 接口：打开并取得 FD、从 FD 读取字节、关闭 FD。读取到的 &lt;code&gt;bytes&lt;/code&gt; 还要按约定的编码解码成字符串。Windows 上 Python 也提供整数文件描述符，但 Windows 原生资源使用的 HANDLE 并不与该整数等同；&lt;a href=&quot;https://docs.python.org/3.12/library/msvcrt.html&quot;&gt;Python 的 Windows 运行时文档&lt;/a&gt;提供了两者之间的转换接口。&lt;/p&gt;
+&lt;p&gt;启动外部程序则是另一类操作。Python 的 &lt;a href=&quot;https://docs.python.org/3.12/library/subprocess.html#subprocess.run&quot;&gt;&lt;code&gt;subprocess.run()&lt;/code&gt;&lt;/a&gt;创建子进程、等待命令完成，并可收集输出和退出码。Windows 提供 &lt;a href=&quot;https://learn.microsoft.com/en-us/windows/win32/procthread/creating-processes&quot;&gt;&lt;code&gt;CreateProcess&lt;/code&gt;&lt;/a&gt; 创建进程；Linux 常见模型则会涉及创建进程和使用 &lt;a href=&quot;https://man7.org/linux/man-pages/man2/execve.2.html&quot;&gt;&lt;code&gt;execve&lt;/code&gt;&lt;/a&gt; 装载程序。Python 选择的具体实现会随平台和条件变化，不应把这些接口画成每次运行都相同的底层调用序列。&lt;/p&gt;
+&lt;p&gt;PID 是操作系统用于标识进程的编号；父进程 PID 表示进程记录中的父子关系。标准输出承载程序输出的数据，退出码则是程序结束时给出的状态。退出码 &lt;code&gt;0&lt;/code&gt; 通常表示程序报告成功，它不能单独证明程序完成了所有业务目标。&lt;/p&gt;
+&lt;h2&gt;05｜我的 Day 3 Python 实验&lt;/h2&gt;
+&lt;p&gt;2026 年 10 月 27 日，我在 Windows、PyCharm 的 Python 虚拟环境中运行 &lt;code&gt;day03_tool_execution.py&lt;/code&gt;。它使用临时目录创建 &lt;code&gt;demo.txt&lt;/code&gt;，然后用两个字典模拟模型返回的工具请求：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;model_calls = [
+    {
+        &quot;name&quot;: &quot;read_file&quot;,
+        &quot;arguments&quot;: {&quot;path&quot;: &quot;demo.txt&quot;},
+    },
+    {
+        &quot;name&quot;: &quot;inspect_process&quot;,
+        &quot;arguments&quot;: {},
+    },
+]
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;code&gt;run_tool(call, workspace)&lt;/code&gt; 根据名称分发。&lt;code&gt;read_file&lt;/code&gt; 先解析并检查路径是否位于临时工作目录，再以二进制模式打开文件、读取最多 4096 字节、关闭描述符并按 UTF-8 解码。以下是文件读取的原始核心片段：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;flags = os.O_RDONLY | getattr(os, &quot;O_BINARY&quot;, 0)
+fd = os.open(path, flags)
+
+try:
+    data = os.read(fd, 4096)
+finally:
+    os.close(fd)
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;另一个分支通过子 Python 解释器打印它看到的 PID 和父 PID；运行方式也是实验文件中的实际代码：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;result = subprocess.run(
+    [sys.executable, &quot;-c&quot;, code],
+    capture_output=True,
+    text=True,
+    encoding=&quot;utf-8&quot;,
+    timeout=5,
+    check=True,
+)
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;那次实际运行记录如下：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;Runtime PID: 17244
+
+read_file -&amp;gt; {&apos;fd&apos;: 3, &apos;content&apos;: &apos;Hello from Agent-408!\r\n&apos;}
+
+inspect_process -&amp;gt; {&apos;output&apos;: &apos;child=18608, parent=17368&apos;, &apos;exit_code&apos;: 0}
+
+进程已结束，退出代码为 0
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;code&gt;fd=3&lt;/code&gt; 是这次打开文件得到的值，不是每次都固定为 3；结果里的换行也保留了这次 Windows 环境的实际记录。&lt;code&gt;read_file&lt;/code&gt; 返回文本，证明演示程序成功读取了测试文件；&lt;code&gt;inspect_process&lt;/code&gt; 收到子程序输出和退出码，说明外部程序确实运行并结束。PID 在不同运行中会变化。&lt;/p&gt;
+&lt;p&gt;还有一个细节：&lt;code&gt;run_tool&lt;/code&gt; 在返回结果前已经通过 &lt;code&gt;finally&lt;/code&gt; 关闭了 FD，所以字典里的 &lt;code&gt;3&lt;/code&gt; 只是记录曾经获得的编号，并不是仍可使用的打开文件。子进程调用设置了 &lt;code&gt;check=True&lt;/code&gt; 和五秒超时：非零退出或超时会以异常表达，不会被这段代码当作正常结果返回。&lt;/p&gt;
+&lt;p&gt;值得注意的是，打印的 Runtime PID 为 &lt;code&gt;17244&lt;/code&gt;，子程序报告的父 PID 为 &lt;code&gt;17368&lt;/code&gt;，两者不相同。虚拟环境启动器或其他中间进程是一种可能性，但我没有验证当时的进程树，不能断言原因。这个实验也没有接入大模型：请求字典是我手写的，结果由模拟 Runtime 打印，并没有真实反馈给模型。&lt;/p&gt;
+&lt;h2&gt;06｜为什么请求不等于执行&lt;/h2&gt;
+&lt;p&gt;这次我把职责分成四层：Model 提出操作请求；Runtime 管理上下文、检查请求并分发；Executor 运行对应函数、子进程或远程调用；操作系统与安全策略限制实际资源访问。它们是逻辑职责，实际产品可能把其中几层放在同一进程，也可能跨越多台机器。&lt;/p&gt;
+&lt;p&gt;模型给出 &lt;code&gt;read_file&lt;/code&gt; 并不自动获得读文件的权限。Runtime 可以拒绝未知工具、非法参数或不符合策略的请求；即使 Runtime 放行，操作系统仍会按进程拥有的权限决定资源能否访问。实验中的路径检查只是教学示例，也可能受到路径解析与实际打开之间的竞争等问题影响，不能视为可安全运行不可信代码的完整沙盒。&lt;/p&gt;
+&lt;h2&gt;07｜我的理解与下一个问题&lt;/h2&gt;
+&lt;p&gt;从工具请求到文件内容，中间发生的不是一次魔法般的“模型执行命令”。模型产生操作意图，Runtime 把它映射到已经实现的工具；工具程序再通过库和操作系统提供的机制完成实际工作。Tool Calling 和系统调用因此处于不同层次，也不需要一一对应。&lt;/p&gt;
+&lt;p&gt;这次实验留给我下一个问题：&lt;strong&gt;即使 Agent 的子进程有独立虚拟地址空间，为什么它仍可能访问同一台计算机上的其他文件？&lt;/strong&gt; 这正是接下来理解 Sandbox 时需要继续追问的问题。&lt;/p&gt;
+&lt;h3&gt;参考资料&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;a href=&quot;https://developers.openai.com/api/docs/guides/function-calling&quot;&gt;OpenAI Function Calling&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://docs.python.org/3.12/library/subprocess.html&quot;&gt;Python 3.12 subprocess&lt;/a&gt; 与 &lt;a href=&quot;https://docs.python.org/3.12/library/os.html&quot;&gt;os&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://learn.microsoft.com/en-us/windows-hardware/drivers/gettingstarted/user-mode-and-kernel-mode&quot;&gt;Microsoft：User Mode and Kernel Mode&lt;/a&gt; 与 &lt;a href=&quot;https://learn.microsoft.com/en-us/windows/win32/procthread/creating-processes&quot;&gt;Creating Processes&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://man7.org/linux/man-pages/man2/open.2.html&quot;&gt;Linux open(2)&lt;/a&gt;、&lt;a href=&quot;https://man7.org/linux/man-pages/man2/execve.2.html&quot;&gt;execve(2)&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+</content:encoded></item><item><title>Agent 等待工具时，CPU 在干什么？从阻塞到异步理解 Runtime</title><link>https://jaisong1n.com/posts/agent-runtime-sync-async-io-wait/</link><guid isPermaLink="true">https://jaisong1n.com/posts/agent-runtime-sync-async-io-wait/</guid><description>从一段真实的 Python 子进程实验出发，解释工具等待时的线程状态、同步与异步、阻塞与非阻塞，以及 Agent Runtime 如何在等待期间安排其他任务。</description><pubDate>Tue, 27 Oct 2026 04:38:52 GMT</pubDate><content:encoded>&lt;h2&gt;01｜Codex 为什么需要等待工具&lt;/h2&gt;
 &lt;p&gt;我让 Codex 运行测试时，常会看到它停在“等待工具结果”这一步。终端里的 &lt;code&gt;pytest&lt;/code&gt; 可能还在跑，远程数据也可能还没返回。此时屏幕没有新文字，不代表 CPU 正替模型一刻不停地“思考”。那么，等待到底发生在哪里？等待期间还能做别的事吗？&lt;/p&gt;
 &lt;p&gt;&lt;a href=&quot;https://jaisong1n.com/posts/model-agent-process-tool-calling/&quot;&gt;上一篇关于模型与进程的文章&lt;/a&gt;把模型提出动作、Runtime 执行工具和操作系统运行进程分开了。这里继续沿着工具调用往下看：当工具需要两秒才返回，Runtime 如何度过这两秒？&lt;/p&gt;
 &lt;h2&gt;02｜等待时，操作系统在做什么&lt;/h2&gt;
