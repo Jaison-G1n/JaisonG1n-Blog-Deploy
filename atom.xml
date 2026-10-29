@@ -5,8 +5,135 @@
   <link href="https://jaisong1n.com/" rel="alternate" type="text/html"/>
   <link href="https://jaisong1n.com/atom.xml" rel="self" type="application/atom+xml"/>
   <id>https://jaisong1n.com/</id>
-  <updated>2026-10-27T16:22:04.000Z</updated>
+  <updated>2026-10-29T17:27:15.000Z</updated>
   <language>zh_CN</language>
+  <entry>
+    <title>子进程不是沙盒：一次 Python 实验揭示的 Agent 权限边界</title>
+    <link href="https://jaisong1n.com/posts/agent-sandbox-runtime-harness-security-boundaries/" rel="alternate" type="text/html"/>
+    <id>https://jaisong1n.com/posts/agent-sandbox-runtime-harness-security-boundaries/</id>
+    <published>2026-10-29T17:27:03.000Z</published>
+    <updated>2026-10-29T17:27:15.000Z</updated>
+    <summary>一次 Python 实验发现：Runtime 拒绝目录外读取，普通子进程却成功访问同一测试文件。沿着这条执行路径，我重新理解了进程隔离、文件权限、Prompt、Harness 与真正 Sandbox 的不同边界。</summary>
+    <content type="html"><![CDATA[<p>前几天研究 Coding Agent 的工具执行机制时，我用 Python 的 <code>subprocess</code> 模块模拟了一个过程：Runtime 收到请求，启动外部程序，等待执行结束，再把结果交回来。</p>
+<p>当时我有个很自然的想法：既然子进程有自己的 PID，也有独立的虚拟地址空间，把 Agent 需要运行的代码放进子进程，是不是就已经隔离起来了？如果我只让它处理当前项目，项目之外的文件应该不会被碰到吧？</p>
+<p>这个判断听起来合理，却混淆了三件事：<strong>进程的内存隔离、程序的访问权限，以及 Runtime 自己写下的检查规则。</strong></p>
+<p>Day 4 的实验恰好让我看清了它们的区别。</p>
+<h2>01｜同一个文件，为什么一边拒绝、一边成功？</h2>
+<p>我没有直接拿电脑上的私人文件做实验，而是让程序创建一个临时目录，再在里面放两个子目录：</p>
+<ul>
+<li><code>workspace</code>：模拟 Agent 被允许工作的项目目录。</li>
+<li><code>outside</code>：模拟项目之外的位置，里面只有一个虚构的测试文件。</li>
+</ul>
+<p>接着，我写了一个极简的读取函数。它在真正读取文件之前，先检查路径是否位于 <code>workspace</code> 下：</p>
+<pre><code>def runtime_read(path, workspace):
+    target = Path(path).resolve()
+    if not target.is_relative_to(workspace.resolve()):
+        return "BLOCKED by Runtime policy"
+    return target.read_text(encoding="utf-8").strip()
+</code></pre>
+<p>然后，我又用 <code>subprocess.run()</code> 启动一个普通 Python 子进程，让它不经过这个函数，直接读取 <code>outside</code> 里的测试文件。关键操作可以简化成：</p>
+<pre><code>result = subprocess.run(
+    [sys.executable, "-c", child_code, str(fake_secret)],
+    capture_output=True,
+    text=True,
+    encoding="utf-8",
+    timeout=5,
+    check=True,
+)
+</code></pre>
+<p>2026 年 10 月 29 日，在 Windows、PyCharm 和 Python 3.12 虚拟环境中，我实际得到了这样的输出：</p>
+<pre><code>Runtime PID: 19164
+Runtime read workspace: WORKSPACE_OK
+Runtime read outside: BLOCKED by Runtime policy
+Child PID: 33916
+Child direct read: FAKE_SECRET_FOR_EXPERIMENT
+</code></pre>
+<p>程序正常结束，退出代码为 0。PID 只是那一次运行时的编号，不会固定不变。</p>
+<p>最值得注意的不是 PID，而是中间两条看似矛盾的结果：<strong>同一个目录外的测试文件，经过 <code>runtime_read()</code> 被拒绝，通过子进程直接读取却成功了。</strong></p>
+<p>我的第一反应是：难道子进程“跳出了限制”？</p>
+<p>但回头看代码就会发现，第二种读取方式压根没有调用 <code>runtime_read()</code>。被绕开的只是一段 Python 函数里的条件判断。我们从未创建真正的操作系统沙盒，所以这次实验<strong>不是 Sandbox Escape（沙盒逃逸）</strong>。</p>
+<p><img src="https://cms.jaisong1n.com/wp-content/uploads/2026/10/day04-two-file-access-paths.png" alt="同一虚构测试文件的两种读取路径：Runtime 函数拒绝目录外访问，普通子进程绕过该函数并在系统权限允许时读取成功。" /></p>
+<p>图 1：两条读取路径针对同一个虚构文件；本实验没有建立真正的 Sandbox。</p>
+<p>这个结果也提出了一个更值得研究的问题：<strong>如果 Agent 可以选择不经过某个工具函数，究竟应该把权限边界放在哪里？</strong></p>
+<h2>02｜独立的进程，为什么不代表独立的文件权限？</h2>
+<p>要回答这个问题，先回到 408 操作系统里的虚拟内存。</p>
+<p>进程通常拥有自己的<strong>虚拟地址空间</strong>。程序使用虚拟地址访问内存时，处理器的内存管理单元（MMU）借助页表等机制完成地址转换和权限检查；TLB 则缓存地址转换结果，加快后续访问。</p>
+<p>这意味着，进程 A 即使知道进程 B 使用了某个虚拟地址，也不能仅凭那个地址，直接读取 B 的私有内存。操作系统当然还可以通过共享内存等受控方式让进程交换数据，但那是另一套明确设计的机制。关于进程虚拟地址空间的边界，可以参考 <a href="https://learn.microsoft.com/en-us/windows/win32/memory/virtual-address-space">Microsoft 的官方说明</a>。</p>
+<p><strong>文件却不是另一个进程的私有内存。</strong></p>
+<p>打开一个文件时，程序是在向操作系统提出访问文件系统资源的请求。两个不同的进程可以分别请求打开同一个文件；能否成功，取决于各自的安全身份、目标文件的访问控制规则，以及其他实际生效的限制。</p>
+<p>Windows 使用 <strong>Access Token（访问令牌）</strong> 描述进程或线程的安全上下文，其中包含账户身份、组及相关特权。对文件等受保护对象的访问，还会结合对象的访问控制信息进行判断。<a href="https://learn.microsoft.com/en-us/windows/win32/secauthz/access-tokens">Microsoft 的 Access Tokens 文档</a>和<a href="https://learn.microsoft.com/en-us/windows/win32/secauthz/access-control-model">访问控制模型</a>解释了这些机制的职责。</p>
+<p>普通 Python 子进程通常以与创建它的程序相近的用户安全身份启动，除非创建时专门采用了不同的令牌或限制方式。它虽然获得了新的 PID 和地址空间，却可能依然有权读取同一个用户创建的文件。</p>
+<p>于是，Day 4 的结果并不矛盾：<strong>这个结果与内存隔离、文件权限各自的作用并不矛盾；两者解决的不是同一个问题。</strong></p>
+<p>还有一个容易误解的地方是“工作目录”。把程序的工作目录设为 <code>D:\408 × Agent</code>，主要改变的是相对路径从哪里解析，并不会自动把这个目录变成安全边界。程序仍可以尝试使用绝对路径；请求能否成功，取决于它真正拥有的访问能力。</p>
+<p><img src="https://cms.jaisong1n.com/wp-content/uploads/2026/10/day04-memory-vs-file-access.png" alt="两个进程各自拥有虚拟地址空间，却可能分别通过操作系统权限检查访问同一个文件。" /></p>
+<p>图 2：独立虚拟地址空间并不意味着两个进程具有独立的文件访问权限。</p>
+<h2>03｜我明明写了 Runtime 规则，它为什么没有拦住子进程？</h2>
+<p>重新看实验，问题便从操作系统转回了应用程序。</p>
+<p><code>runtime_read()</code> 里面的目录校验只负责一件事：<strong>调用这个函数时，检查目标路径；不符合条件就不继续读取。</strong></p>
+<p>它没有修改 Windows 账户的权限，也没有为子进程创建受限安全令牌，更没有让操作系统对整个进程组实施统一的文件访问策略。</p>
+<p>因此，两条路径的执行过程实际上不同：</p>
+<pre><code>请求 A → runtime_read() → 路径检查 → 拒绝读取
+
+请求 B → subprocess.run() → 新进程自己的文件 API
+       → 操作系统访问检查 → 本次读取成功
+</code></pre>
+<p>这让我理解了 <strong>Runtime Policy（运行时策略）</strong> 的边界。</p>
+<p>Runtime 可以通过工具注册表、参数校验和策略规则，决定某个请求要不要被分发。例如，它完全可以拒绝 <code>read_file</code> 中的目录外路径。<strong>但一条只覆盖 <code>read_file</code> 入口的规则，并不会神奇地约束另一个拥有通用代码执行能力的工具。</strong></p>
+<p>这并不是说 Runtime 的校验没有价值。相反，入口校验能在执行前发现错误参数、拒绝不符合产品规则的操作，也更容易结合任务语义作判断。问题在于：它不能被误认为已经限制了执行程序的全部资源访问能力。</p>
+<p>实验中的 <code>Path.resolve()</code> 和 <code>is_relative_to()</code> 也只是教学中的简化检查。实际文件系统还可能出现符号链接、检查与打开之间的状态变化等问题。不能把几行路径判断包装成可以处理不可信代码的安全沙盒。</p>
+<p>那么，如果把规则写得更严一点呢？比如在系统提示词里要求：“只能访问当前项目，绝不读取外部文件。”</p>
+<p>这又引出了另一个问题：<strong>提示词究竟在约束谁？</strong></p>
+<h2>04｜如果检查只能管住一个入口，真正的边界应该放在哪里？</h2>
+<p>既然某个工具函数的路径检查无法约束所有执行路径，就需要把两件事分开：<strong>在执行前判断请求是否应当放行，以及在执行时限制程序实际能够触及的资源。</strong> 前者可以由 Runtime 的程序策略完成，后者需要有效的 Sandbox 和操作系统访问控制。</p>
+<p>顺着这个区别，我还想到了一个曾经很自然的做法：把“只能访问工作区”写进提示词，是不是也能给 Agent 加一道限制？现在看，这里的限制首先作用于<strong>模型的决策</strong>：它影响模型会尝试提出什么行动，却不能直接改变 Python 进程的文件权限。</p>
+<p>真正负责把模型请求变成操作的，是开发者实现的 Agent 运行系统。</p>
+<p>通常可以把它称为 <strong>Harness</strong>：围绕模型组织上下文、Agent Loop、工具注册、执行反馈及策略的整套软件机制。<strong>Runtime</strong> 更强调这套机制在运行时如何协调和执行。两个词在不同产品中用法有所交叉，没有必要人为划出全行业统一的严格边界。</p>
+<p>因此，我继续追问：<strong>Runtime 到底听谁的？是厂商自己写的 Harness 决定的吗？</strong></p>
+<p>大体上是。开发者决定系统提供哪些工具、如何校验参数、在什么条件下执行、怎样管理执行环境；管理员和用户则可以在产品支持的范围内配置权限和策略。模型能够提出请求，却不能仅凭输出一段文字，就自动改写 Harness 的程序逻辑。</p>
+<p>如果某项操作需要用户确认，Runtime 还可能发起 <strong>Approval（审批）</strong>。但审批解决的是“这次是否获得授权”，不是“进程已经具备哪些操作系统权限”。用户点了允许，具体会放宽哪项执行限制，仍取决于产品实现；远程服务也仍然会检查自己的认证与授权。</p>
+<p>换句话说，我们讨论的是三个不同的问题：</p>
+<p><strong>模型想不想这样做？Runtime 愿不愿意放行？实际执行环境有没有能力这样做？</strong></p>
+<p>Prompt 主要影响第一个问题，Runtime 的代码和策略影响第二个问题，Sandbox 与系统权限机制则直接关系到第三个问题。它们可以协作，但不能互相冒充。</p>
+<p>有一种例外值得说清：如果 Harness 明确提供了<strong>经过授权的</strong>沙盒配置工具，自然语言请求可以经由这个工具间接改变执行环境。这种变化来自真实的程序操作，不是提示词本身拥有了修改操作系统权限的力量。</p>
+<p><img src="https://cms.jaisong1n.com/wp-content/uploads/2026/10/day04-prompt-runtime-sandbox-boundaries.png" alt="Prompt 影响模型决策，Harness Runtime 负责工具校验和可能的审批，本地执行器在可配置的 Sandbox 中受到实际资源访问约束。" /></p>
+<p>图 3：Prompt、Runtime 策略、条件审批与执行环境各有职责；远程服务独立授权。</p>
+<p>真正的 Sandbox 因此有了清楚的位置：它不是另一段用来劝说模型的文字，而是<strong>限制执行代码能够实际接触哪些资源的机制</strong>。</p>
+<h2>05｜真正的 Sandbox 为什么不会被普通子进程自动绕过？</h2>
+<p>如果希望 Coding Agent 能够运行测试，却不能随意读取无关文件，就必须在执行环境中建立有效的资源限制。它可能包括文件系统访问、网络连接、进程权限以及 CPU、内存等资源配额；具体需要哪些，取决于任务和威胁模型。</p>
+<p>在 Windows 上，<a href="https://learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-isolation"><strong>AppContainer</strong></a> 可以提供受限制的应用执行环境；Restricted Token 等机制也可以参与构建更小的权限范围。Linux 则有不同的组成部分：<a href="https://docs.kernel.org/userspace-api/landlock.html"><strong>Landlock</strong></a> 可以施加文件系统等访问控制，<a href="https://www.kernel.org/doc/html/latest/userspace-api/seccomp_filter.html"><strong>seccomp</strong></a> 用于过滤系统调用。特别要注意，Linux 内核文档明确指出：<strong>seccomp 单独并不是完整沙盒</strong>，它只是构建受限执行环境的一种工具。</p>
+<p>于是我还有一个疑问：<strong>既然 Sandbox 限制了进程，那它新建一个子进程，不就又有新的 PID 了吗？是不是可以“跳出去”？</strong></p>
+<p>通常不能因为“新建进程”这件事本身就获得更高权限。以 Linux Landlock 为例，相关限制会约束受限制线程的后代；在满足相应条件时，seccomp 过滤规则也会继续约束创建的新进程及执行的新程序。Windows AppContainer 的普通子进程创建行为，也有相应的<a href="https://learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-for-legacy-applications-">令牌与限制继承规则</a>。</p>
+<p>这些机制的实现细节并不相同，不能笼统保证“任何沙盒都会自动限制任何进程”。但一个设计正确、覆盖了实际执行路径的沙盒，恰恰应该避免仅通过再启动一个普通子进程就失去隔离。</p>
+<p>反过来，如果新进程根本没有进入受限环境，或者沙盒预先暴露了过大的能力，结果就可能不同。</p>
+<p>例如，执行环境虽然限制了本地文件访问，却仍能调用一个拥有高权限的外部服务，并持有可用凭据。它或许不能直接打开某个文件，却可能请求那个服务代为完成其他敏感操作。这涉及<strong>权限暴露与边界设计</strong>，不一定是突破沙盒底层隔离的漏洞。</p>
+<p>同样需要区分：绕过 Python 函数检查、沙盒配置不完整、借助过高权限的外部接口，以及利用漏洞突破有效隔离，并不是一回事。严格意义上的 <strong>Sandbox Escape</strong> 通常指突破原本应该生效的沙盒安全边界。</p>
+<p>Day 4 的实验只验证了第一种情况。把它写成“子进程成功逃逸沙盒”，既不符合实验事实，也会误导后续的工程设计。</p>
+<h2>06｜这次实验真正改变了我的什么认识？</h2>
+<p>回过头看，这段实验代码并没有多复杂：一个临时目录、两条文件读取路径、一段 Python 函数规则，以及一个普通子进程。</p>
+<p>但它帮我纠正了一个很重要的直觉：<strong>把代码放进独立进程，是运行方式的变化，不自动意味着它被放进了权限更小的环境。</strong></p>
+<p>我也不再把“提示词里写了禁止”“Runtime 拒绝了一次调用”“程序在 Sandbox 中运行”混成一句笼统的“Agent 已经受限”。</p>
+<p>它们回答的是不同问题。对一个 Coding Agent 而言，模型生成什么请求、Harness 如何处理请求、工具运行在哪里，以及实际资源访问由谁强制限制，必须分别说清。</p>
+<p>如果希望 Agent 自主修改项目、运行测试，却尽可能不影响其他文件，更可靠的方向不是不断增加“请不要越界”的文字，而是<strong>从执行环境出发落实最小权限原则</strong>：只提供完成任务必需的资源访问能力，确保约束覆盖真实执行路径，并谨慎对待外部服务、凭据及已暴露的权限。</p>
+<p>这也是我这次从一次普通 <code>subprocess</code> 实验走向 Sandbox 设计时，最重要的收获。</p>
+<hr />
+<h3>参考资料</h3>
+<ul>
+<li><a href="https://learn.microsoft.com/en-us/windows/win32/memory/virtual-address-space">Microsoft Learn：Virtual Address Space</a></li>
+<li><a href="https://learn.microsoft.com/en-us/windows/win32/secauthz/access-tokens">Microsoft Learn：Access Tokens</a></li>
+<li><a href="https://learn.microsoft.com/en-us/windows/win32/secauthz/access-control-model">Microsoft Learn：Access Control Model</a></li>
+<li><a href="https://learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-isolation">Microsoft Learn：AppContainer Isolation</a></li>
+<li><a href="https://learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-for-legacy-applications-">Microsoft Learn：AppContainer for Legacy Applications</a></li>
+<li><a href="https://docs.kernel.org/userspace-api/landlock.html">Linux Kernel：Landlock</a></li>
+<li><a href="https://www.kernel.org/doc/html/latest/userspace-api/seccomp_filter.html">Linux Kernel：Seccomp BPF</a></li>
+<li><a href="https://docs.python.org/3.12/library/subprocess.html">Python 3.12：subprocess</a></li>
+<li><a href="https://docs.docker.com/engine/security/">Docker：Engine Security</a></li>
+</ul>
+]]></content>
+    <author>
+      <name>JaisonG1n</name>
+    </author>
+    <category term="AI与Agent"></category>
+  </entry>
   <entry>
     <title>模型下达命令后，谁真正动手？从系统调用理解 Agent 工具执行</title>
     <link href="https://jaisong1n.com/posts/agent-tool-execution-system-calls/" rel="alternate" type="text/html"/>
