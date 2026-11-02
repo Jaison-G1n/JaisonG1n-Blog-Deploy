@@ -1,4 +1,74 @@
-<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>JaisonG1n</title><description>Code, AI and Everything in Between</description><link>https://jaisong1n.com/</link><language>zh_CN</language><item><title>子进程不是沙盒：一次 Python 实验揭示的 Agent 权限边界</title><link>https://jaisong1n.com/posts/agent-sandbox-runtime-harness-security-boundaries/</link><guid isPermaLink="true">https://jaisong1n.com/posts/agent-sandbox-runtime-harness-security-boundaries/</guid><description>一次 Python 实验发现：Runtime 拒绝目录外读取，普通子进程却成功访问同一测试文件。沿着这条执行路径，我重新理解了进程隔离、文件权限、Prompt、Harness 与真正 Sandbox 的不同边界。</description><pubDate>Thu, 29 Oct 2026 17:27:03 GMT</pubDate><content:encoded>&lt;p&gt;前几天研究 Coding Agent 的工具执行机制时，我用 Python 的 &lt;code&gt;subprocess&lt;/code&gt; 模块模拟了一个过程：Runtime 收到请求，启动外部程序，等待执行结束，再把结果交回来。&lt;/p&gt;
+<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>JaisonG1n</title><description>Code, AI and Everything in Between</description><link>https://jaisong1n.com/</link><language>zh_CN</language><item><title>CPU 已经会调度了，Agent 为什么还需要安排任务？</title><link>https://jaisong1n.com/posts/agent-runtime-task-scheduling-dag/</link><guid isPermaLink="true">https://jaisong1n.com/posts/agent-runtime-task-scheduling-dag/</guid><description>从一次 Python 模拟实验出发，对比串行和 DAG 并发，理解操作系统调度、Agent 任务依赖与最优调度的边界。</description><pubDate>Mon, 02 Nov 2026 15:29:17 GMT</pubDate><content:encoded>&lt;blockquote&gt;
+&lt;p&gt;&lt;strong&gt;408 × Agent · Day 5&lt;/strong&gt;&lt;br /&gt;
+学习与实验日期：2026 年 11 月 2 日&lt;br /&gt;
+关键词：操作系统调度、DAG、异步并发、关键路径、任务优化&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;研究 Agent Runtime 的工具执行机制时，我一直有一个疑问：操作系统明明已经有成熟的调度器，能够在不同进程、线程之间分配 CPU 时间，为什么 Agent 还要自己决定什么时候调用工具、哪些任务可以同时进行？&lt;/p&gt;
+&lt;p&gt;这个问题在 Coding Agent 上尤其直观。假设我要求它检查项目、运行测试并整理结果。文件扫描和测试程序都可以由操作系统正常运行，但如果测试依赖尚未读取的配置，或者总结报告必须等待所有检查完成，&lt;strong&gt;操作系统不会替我理解这些业务关系&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;我想弄清楚的，不是怎样让 CPU 更忙，而是：&lt;strong&gt;当多个工具请求共同构成一个任务时，谁负责安排它们的先后与并发？这种安排能不能更快，甚至做到最优？&lt;/strong&gt;&lt;/p&gt;
+&lt;h2&gt;01｜操作系统调度的是线程，Agent 关心的是任务&lt;/h2&gt;
+&lt;p&gt;在 408 操作系统中，CPU 调度研究的是可运行实体如何获得处理器。一个线程进入就绪状态，操作系统根据调度策略选择它运行；遇到需要等待的 I/O 时，相关执行实体可能阻塞，CPU 则可以分配给其他可运行线程。&lt;/p&gt;
+&lt;p&gt;这和 Agent 的“任务就绪”不是同一个意思。&lt;/p&gt;
+&lt;p&gt;比如我让 Coding Agent 完成四件事：读取项目配置（A）、扫描项目文件（B）、运行相关检查（C）、汇总报告（D）。它们的含义不是四个固定的操作系统进程：某一步可能只调用一个 Python 函数，某一步可能启动 &lt;code&gt;pytest&lt;/code&gt; 子进程，还有一步可能请求远程 API。&lt;/p&gt;
+&lt;p&gt;操作系统可以调度其中实际存在的线程，却不知道“C 需要 A 的结果”“D 必须等待 B 和 C”。这些是应用层定义的&lt;strong&gt;任务依赖&lt;/strong&gt;。因此，即使计算机拥有多个 CPU 核心、每个工具都能启动成功，错误的执行顺序仍可能让整个工作流失败。&lt;/p&gt;
+&lt;p&gt;这时，Agent Runtime 或更一般的工作流执行器就需要管理另一层调度：哪些操作已经具备开始条件、哪些可以并发、哪些必须等前置任务完成。简单 Agent 可能只用几行 &lt;code&gt;await&lt;/code&gt; 表达顺序，复杂系统才会显式维护任务队列和调度状态；并不是每个 Agent 都必须有一个独立的“调度器”模块。&lt;/p&gt;
+&lt;h2&gt;02｜把任务依赖画出来，才能讨论并发&lt;/h2&gt;
+&lt;p&gt;为了让问题具体一些，我为四项任务假设了确定的耗时：A 读取配置用 1 秒，B 扫描文件用 2 秒，C 运行检查用 2 秒，D 汇总用 1 秒。&lt;/p&gt;
+&lt;p&gt;这里我只设置两组依赖：&lt;strong&gt;C 必须在 A 完成后开始；D 必须等待 B 和 C 完成&lt;/strong&gt;。A 和 B 没有相互依赖，可以同时启动。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://cms.jaisong1n.com/wp-content/uploads/2026/11/day05_task_dag-1.png&quot; alt=&quot;四个任务的有向无环图，A→C→D 是耗时 4 秒的关键路径，B→D 是另一条依赖路径。&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;图 1｜四项任务的依赖图。A 和 B 可同时开始；C 依赖 A，D 同时依赖 B 与 C。&lt;/p&gt;
+&lt;p&gt;这种结构可以用 DAG（Directed Acyclic Graph，有向无环图）表示。图中的节点是任务，有向边表示“先完成前一个任务，后一个任务才能开始”。如果依赖形成 A 等 B、B 等 C、C 又等 A 的环，就不存在完整的合法先后顺序。&lt;/p&gt;
+&lt;p&gt;Python 标准库中的 &lt;a href=&quot;https://docs.python.org/3.12/library/graphlib.html&quot;&gt;&lt;code&gt;graphlib.TopologicalSorter&lt;/code&gt;&lt;/a&gt; 能处理这类依赖，找到符合前置条件的任务顺序，并在存在环时报告错误。但这里需要区分：&lt;strong&gt;拓扑排序保证顺序合法，不保证总耗时最短。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;例如 A、B、C、D 全部依次运行，确实不违反上述依赖；但 B 并不需要等 A，因此这种排列浪费了可以重叠的等待时间。要让工作流更快，不能只问顺序是否合法，还要问哪些任务可以在不破坏依赖的情况下同时推进。&lt;/p&gt;
+&lt;h2&gt;03｜我在 PyCharm 中做了一次 6 秒与 4 秒的对照&lt;/h2&gt;
+&lt;p&gt;为了观察差别，我在 &lt;code&gt;D:\408 × Agent\day05_task_scheduler\day05_agent_scheduler.py&lt;/code&gt; 中写了两个版本。它们处理同样的四项任务，区别只在执行顺序。&lt;/p&gt;
+&lt;p&gt;串行版本依次 &lt;code&gt;await&lt;/code&gt; A、B、C、D。另一个版本先让 A→C 这条分支与 B 并发，等两条分支都结束，再开始 D。核心结构是：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;async def branch_ac():
+    await run_step(&apos;A&apos;, start)
+    await run_step(&apos;C&apos;, start)
+
+await asyncio.gather(
+    branch_ac(),
+    run_step(&apos;B&apos;, start),
+)
+await run_step(&apos;D&apos;, start)
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;这里 &lt;code&gt;asyncio.gather()&lt;/code&gt; 的作用，是让两个可等待操作在事件循环中并发推进，并等待它们都完成；它不会自动分析 A、B、C、D 之间的业务依赖。A→C 的顺序是我在代码里手动写好的。Python &lt;a href=&quot;https://docs.python.org/3.12/library/asyncio-task.html&quot;&gt;官方文档&lt;/a&gt; 也说明了 &lt;code&gt;gather()&lt;/code&gt; 的并发调度行为。&lt;/p&gt;
+&lt;p&gt;11 月 2 日，我在 Windows 的 PyCharm、Python 3.12 虚拟环境中实际运行了这段代码，得到：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;Serial total: 6.03
+DAG total: 4.01
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;下面是这次运行的原始截图，保留了两种方案各自的开始与结束时间，以及进程正常退出的信息。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://cms.jaisong1n.com/wp-content/uploads/2026/11/day05_pycharm_experiment.png&quot; alt=&quot;用户在 PyCharm 中运行 Day 5 Python 实验，串行总耗时 6.03 秒，按依赖并发总耗时 4.01 秒，进程退出码为 0。&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;图 2｜Day 5 的真实实验截图。串行与依赖感知并发分别耗时 6.03 秒和 4.01 秒；这是一次运行记录，不代表所有机器上的固定结果。&lt;/p&gt;
+&lt;p&gt;时间日志也能解释差异。串行版本中，B 等 A 结束才开始，C 等 B 结束才开始，D 最后执行。并发版本则在接近 0 秒时同时启动 A 和 B：A 在约 1 秒完成，C 随即开始；B 在约 2 秒完成；C 在约 3 秒完成；D 才在约 3 秒开始，约 4 秒结束。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://cms.jaisong1n.com/wp-content/uploads/2026/11/day05_execution_timeline-1.png&quot; alt=&quot;串行方案四项任务顺序执行约 6 秒；并发方案让 B 与 A→C 分支重叠，在完成 B、C 后运行 D，理论约 4 秒。&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;图 3｜同一组模拟 I/O 任务的理想化时间线。通过重叠独立分支，理论总耗时由 6 秒降为 4 秒；真实单次运行分别为 6.03 秒与 4.01 秒。&lt;/p&gt;
+&lt;p&gt;为什么会快大约 2 秒？因为独立分支的等待时间重叠了，而不是任何单项工具突然运行得更快。&lt;/p&gt;
+&lt;p&gt;不过，这个实验有明确边界：我用的是 &lt;code&gt;asyncio.sleep()&lt;/code&gt; &lt;strong&gt;模拟 I/O 等待&lt;/strong&gt;，并未真正运行四个外部工具，也没有接入大模型。它说明合理组织异步等待能够缩短这组模拟任务的墙钟耗时，&lt;strong&gt;不能据此证明真实 Coding Agent 的所有任务都能获得相同比例的加速&lt;/strong&gt;。&lt;/p&gt;
+&lt;h2&gt;04｜既然有最优调度算法，为什么还需要 Agent 自己安排？&lt;/h2&gt;
+&lt;p&gt;看到实验结果后，我又想到一个问题：既然已经有拓扑排序、关键路径、约束优化等算法，任务安排是不是可以直接交给最优算法，而不需要模型费心规划？&lt;/p&gt;
+&lt;p&gt;对于&lt;strong&gt;任务和依赖已经明确&lt;/strong&gt;的小问题，确实可以，而且我们这次的示例就能证明一个最优结果。&lt;/p&gt;
+&lt;p&gt;不论怎么并发，A、C、D 都必须依次完成。它们合起来需要 1＋2＋1＝4 秒。因此，在任务耗时固定、不考虑额外资源冲突的理想条件下，整个工作流至少需要 4 秒。我们实际采用的方案恰好让 B 与 A→C 分支重叠，理论完成时间也正好是 4 秒。&lt;/p&gt;
+&lt;p&gt;也就是说，&lt;strong&gt;对这个简化模型，4 秒不仅比 6 秒更快，而且已经达到由关键路径给出的理论下界&lt;/strong&gt;。这比单纯说“异步比较快”更有解释力。&lt;/p&gt;
+&lt;p&gt;但事情一旦复杂，最优解就不总是容易得到。假设工具同时争用一块 GPU、一个只能串行写入的文件、有限的 API 并发额度，调度就不仅涉及依赖，还涉及资源分配。有些可以建成约束规划或整数优化问题；例如 Google 的 &lt;a href=&quot;https://developers.google.com/optimization/scheduling/job_shop&quot;&gt;OR-Tools Job Shop 示例&lt;/a&gt; 就在任务顺序与机器互斥约束下最小化总完成时间（makespan）。求解器可以在相应实例上找到并证明最优解，但随着问题规模和约束增加，求解本身也可能变得昂贵。&lt;/p&gt;
+&lt;p&gt;更重要的是，&lt;strong&gt;Agent 往往连完整任务图都不知道&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;如果我让 Codex “修复导致测试失败的 Bug”，它起初可能只知道要运行测试。看到报错后才发现需要检查某个模块；读完模块又发现问题来自配置。接下来的任务、依赖甚至预计耗时，都是随着工具结果逐步出现的。&lt;/p&gt;
+&lt;p&gt;因此，“为已知任务寻找更优执行顺序”和“根据新证据决定接下来需要做哪些任务”，其实是两个不同的问题。前者是调度优化，后者更接近 Agent Planning。它们适合协作：模型生成或修正计划，执行系统在已知约束内组织任务，再把新结果反馈给模型。&lt;/p&gt;
+&lt;h2&gt;05｜真实执行还要面对资源冲突和失败&lt;/h2&gt;
+&lt;p&gt;我们这次手写的 DAG 很理想：每项任务都会成功，耗时固定，彼此没有资源冲突。但 Coding Agent 修改代码时，情况并非如此。&lt;/p&gt;
+&lt;p&gt;比如两个工具都要改写同一个配置文件，即使从任务描述上看它们可以并发，实际执行却可能互相覆盖。又比如模型 API 有并发限制，盲目启动更多请求可能触发限流；测试程序失败，也可能需要先分析错误，而不是直接启动下一步。&lt;/p&gt;
+&lt;p&gt;这时，Runtime 除了管理依赖，还可能需要限制并发数、保护共享状态，以及记录任务的等待、执行、成功或失败状态。&lt;code&gt;asyncio.Lock&lt;/code&gt;、&lt;code&gt;asyncio.Semaphore&lt;/code&gt; 可以用于同一事件循环内的协程协调，但它们不是跨进程或跨服务器自动生效的通用锁。&lt;a href=&quot;https://docs.python.org/3.12/library/asyncio-sync.html&quot;&gt;Python 同步原语文档&lt;/a&gt; 对这些机制有明确说明。&lt;/p&gt;
+&lt;p&gt;还有一个不能忽略的取舍：&lt;strong&gt;最快并不必然等于最好&lt;/strong&gt;。如果同时启动更多模型请求能缩短时间，却明显增加 Token 费用或失败重试成本，是否值得，就取决于任务目标。所谓“最优调度”必须先说明优化的是完成时间、资源消耗、费用，还是成功率与风险之间的权衡。&lt;/p&gt;
+&lt;p&gt;回到 Day 5 的问题，Agent Runtime 的价值并不是发明了另一种 CPU 调度算法，而是要在真实任务的语义、资源和反馈之上，决定如何让多个操作协作完成目标。&lt;/p&gt;
+&lt;h2&gt;06｜从“让程序跑起来”到“把事情安排对”&lt;/h2&gt;
+&lt;p&gt;Day 2 学异步时，我关心的是：当一个工具正在等待，程序能不能做别的事。Day 3 研究系统调用时，我关心的是：工具请求怎样真正变成文件访问或子进程。Day 4 研究 Sandbox 时，我关心的是：这些操作实际被允许接触哪些资源。&lt;/p&gt;
+&lt;p&gt;到了 Day 5，我开始意识到还有第四个问题：&lt;strong&gt;就算每个工具都能正确、安全地执行，把它们放在一起，也不等于整个任务就能高效完成。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;操作系统能为线程分配 CPU；Agent Runtime 则需要理解任务的先后关系，并在这些关系允许的范围内组织执行。&lt;/p&gt;
+&lt;p&gt;这次实验已经说明，在不改变每项模拟任务耗时的情况下，仅仅调整编排方式，就能把一次运行从 6.03 秒缩短到 4.01 秒。进一步分析关键路径，还能解释为什么这个简化模型的理论最短时间是 4 秒。&lt;/p&gt;
+&lt;p&gt;不过，我现在的代码只是手动把 A→C 与 B 并发写在一起，并不是一个能自动处理任意依赖图的调度器。下一步更值得做的实验，是把任务、依赖和资源限制都写成数据，让程序自动找出就绪任务，随后比较拓扑排序、关键路径优先与更一般的优化方法。&lt;/p&gt;
+&lt;p&gt;我希望以后理解 Agent Planning 时，能够始终区分这两件事：&lt;strong&gt;模型为什么提出这些步骤，以及执行系统为什么以这种顺序运行它们。&lt;/strong&gt; 两者合起来，才真正接近一个能把复杂任务安排妥当的 Agent。&lt;/p&gt;
+</content:encoded></item><item><title>子进程不是沙盒：一次 Python 实验揭示的 Agent 权限边界</title><link>https://jaisong1n.com/posts/agent-sandbox-runtime-harness-security-boundaries/</link><guid isPermaLink="true">https://jaisong1n.com/posts/agent-sandbox-runtime-harness-security-boundaries/</guid><description>一次 Python 实验发现：Runtime 拒绝目录外读取，普通子进程却成功访问同一测试文件。沿着这条执行路径，我重新理解了进程隔离、文件权限、Prompt、Harness 与真正 Sandbox 的不同边界。</description><pubDate>Thu, 29 Oct 2026 17:27:03 GMT</pubDate><content:encoded>&lt;p&gt;前几天研究 Coding Agent 的工具执行机制时，我用 Python 的 &lt;code&gt;subprocess&lt;/code&gt; 模块模拟了一个过程：Runtime 收到请求，启动外部程序，等待执行结束，再把结果交回来。&lt;/p&gt;
 &lt;p&gt;当时我有个很自然的想法：既然子进程有自己的 PID，也有独立的虚拟地址空间，把 Agent 需要运行的代码放进子进程，是不是就已经隔离起来了？如果我只让它处理当前项目，项目之外的文件应该不会被碰到吧？&lt;/p&gt;
 &lt;p&gt;这个判断听起来合理，却混淆了三件事：&lt;strong&gt;进程的内存隔离、程序的访问权限，以及 Runtime 自己写下的检查规则。&lt;/strong&gt;&lt;/p&gt;
 &lt;p&gt;Day 4 的实验恰好让我看清了它们的区别。&lt;/p&gt;
